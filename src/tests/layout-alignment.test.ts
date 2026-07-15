@@ -149,6 +149,67 @@ describe("layout alignment", () => {
       });
       expect(buildSimplifiedLayout(node).gap).toBe("10px");
     });
+
+    test("wrapped row: explicit zero counter gap must not drop the primary gap", () => {
+      const node = makeFrame({
+        layoutMode: "HORIZONTAL",
+        layoutWrap: "WRAP",
+        itemSpacing: 20,
+        counterAxisSpacing: 0,
+      });
+      expect(buildSimplifiedLayout(node).gap).toBe("0px 20px");
+    });
+
+    test("wrapped row: explicit zero primary gap keeps the counter gap", () => {
+      const node = makeFrame({
+        layoutMode: "HORIZONTAL",
+        layoutWrap: "WRAP",
+        itemSpacing: 0,
+        counterAxisSpacing: 24,
+      });
+      expect(buildSimplifiedLayout(node).gap).toBe("24px 0px");
+    });
+
+    test("wrapped: both gaps zero emit nothing (all-default)", () => {
+      const node = makeFrame({
+        layoutWrap: "WRAP",
+        itemSpacing: 0,
+        counterAxisSpacing: 0,
+      });
+      expect(buildSimplifiedLayout(node).gap).toBeUndefined();
+    });
+  });
+
+  describe("padding", () => {
+    test("symmetric padding collapses to two-value shorthand", () => {
+      const node = makeFrame({
+        paddingTop: 8,
+        paddingRight: 16,
+        paddingBottom: 8,
+        paddingLeft: 16,
+      });
+      expect(buildSimplifiedLayout(node).padding).toBe("8px 16px");
+    });
+
+    test("asymmetric padding emits full top/right/bottom/left order", () => {
+      const node = makeFrame({
+        paddingTop: 1,
+        paddingRight: 2,
+        paddingBottom: 3,
+        paddingLeft: 4,
+      });
+      expect(buildSimplifiedLayout(node).padding).toBe("1px 2px 3px 4px");
+    });
+
+    test("partial padding fills missing sides with 0", () => {
+      const node = makeFrame({ paddingLeft: 20 });
+      expect(buildSimplifiedLayout(node).padding).toBe("0px 0px 0px 20px");
+    });
+
+    test("no padding emits nothing", () => {
+      const node = makeFrame({});
+      expect(buildSimplifiedLayout(node).padding).toBeUndefined();
+    });
   });
 
   describe("alignItems stretch detection", () => {
@@ -293,7 +354,12 @@ describe("layout alignment", () => {
       expect(buildSimplifiedLayout(node).locationRelativeToParent).toBeUndefined();
     });
 
-    test("omits position for in-flow children of an auto-layout parent", () => {
+    test("emits position for in-flow children of an auto-layout parent too", () => {
+      // Deliberate behavior: locationRelativeToParent is emitted for ALL
+      // children with bounding-box data, auto-layout flow included — it's the
+      // rendered "top/left from parent" a consumer can use to verify its
+      // reconstruction, not a layout instruction (the guide says stack
+      // layout wins; absolute sizes/positions are reference data).
       const parent = makeFrame({
         layoutMode: "HORIZONTAL",
         absoluteBoundingBox: { x: 0, y: 0, width: 200, height: 100 },
@@ -301,7 +367,10 @@ describe("layout alignment", () => {
       const child = makeFrame({
         absoluteBoundingBox: { x: 10, y: 10, width: 50, height: 50 },
       });
-      expect(buildSimplifiedLayout(child, parent).locationRelativeToParent).toBeUndefined();
+      expect(buildSimplifiedLayout(child, parent).locationRelativeToParent).toEqual({
+        x: 10,
+        y: 10,
+      });
     });
 
     test("emits position for ABSOLUTE children inside an auto-layout parent", () => {

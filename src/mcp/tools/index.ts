@@ -1,4 +1,16 @@
 export { getFigmaDataTool } from "./get-figma-data-tool.js";
 export { downloadFigmaImagesTool } from "./download-figma-images-tool.js";
+export { writeImagesetTool } from "./write-imageset-tool.js";
+export { writeColorsetTool } from "./write-colorset-tool.js";
+export { getFigmaCommentsTool } from "./get-figma-comments-tool.js";
+export { getFigmaVersionsTool } from "./get-figma-versions-tool.js";
+export { getRenderUrlsTool } from "./get-render-urls-tool.js";
+export { getFigmaVariablesTool } from "./get-figma-variables-tool.js";
 export type { DownloadImagesParams } from "./download-figma-images-tool.js";
 export type { GetFigmaDataParams } from "./get-figma-data-tool.js";
+export type { WriteImagesetToolParams } from "./write-imageset-tool.js";
+export type { WriteColorsetToolParams } from "./write-colorset-tool.js";
+export type { GetFigmaCommentsParams } from "./get-figma-comments-tool.js";
+export type { GetFigmaVersionsParams } from "./get-figma-versions-tool.js";
+export type { GetRenderUrlsParams } from "./get-render-urls-tool.js";
+export type { GetFigmaVariablesParams } from "./get-figma-variables-tool.js";

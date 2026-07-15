@@ -1,10 +1,17 @@
 import { serializeAsTree } from "./serialize-tree.js";
 import type { SerializableDesign } from "./serializable-design.js";
+import { toNativeJson, toNativeYaml } from "./native-json.js";
 import { dumpYaml } from "./yaml-dump.js";
 
-export type OutputFormat = "yaml" | "json" | "tree";
+export type OutputFormat = "yaml" | "json" | "tree" | "native-json" | "native-yaml";
 
-export const VALID_OUTPUT_FORMATS: readonly OutputFormat[] = ["yaml", "json", "tree"];
+export const VALID_OUTPUT_FORMATS: readonly OutputFormat[] = [
+  "yaml",
+  "json",
+  "tree",
+  "native-json",
+  "native-yaml",
+];
 
 export function isOutputFormat(value: string): value is OutputFormat {
   return (VALID_OUTPUT_FORMATS as readonly string[]).includes(value);
@@ -17,5 +24,7 @@ export function isOutputFormat(value: string): value is OutputFormat {
 export function serializeResult(result: unknown, format: OutputFormat): string {
   if (format === "json") return JSON.stringify(result, null, 2);
   if (format === "tree") return serializeAsTree(result as SerializableDesign);
+  if (format === "native-json") return toNativeJson(result as SerializableDesign);
+  if (format === "native-yaml") return toNativeYaml(result as SerializableDesign);
   return dumpYaml(result);
 }

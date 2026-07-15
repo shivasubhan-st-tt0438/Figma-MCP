@@ -9,6 +9,7 @@ import type {
   Node as FigmaDocumentNode,
   HasFramePropertiesTrait,
   HasLayoutTrait,
+  LayoutConstraint,
 } from "@figma/rest-api-spec";
 import { generateCSSShorthand, pixelRound } from "~/utils/common.js";
 
@@ -35,6 +36,10 @@ export interface SimplifiedLayout {
   };
   overflowScroll?: ("x" | "y")[];
   position?: "absolute";
+  constraints?: {
+    horizontal: LayoutConstraint["horizontal"];
+    vertical: LayoutConstraint["vertical"];
+  };
 }
 
 // Convert Figma's layout config into a more typical flex-like schema
@@ -125,10 +130,18 @@ function buildGap(n: HasFramePropertiesTrait, mode: "row" | "column"): string | 
   return gapShorthand(rowGap, colGap);
 }
 
+// undefined = axis not applicable (suppressed or non-wrapping); 0 = a real
+// explicit value. The distinction matters: treating 0 as "absent" made a
+// wrapped row with itemSpacing 20 + counterAxisSpacing 0 collapse to "0px",
+// silently dropping the 20px primary gap.
 function gapShorthand(row?: number, col?: number): string | undefined {
-  if (!row && !col) return undefined;
-  if (row && col) return row === col ? `${row}px` : `${row}px ${col}px`;
-  return `${(row ?? col)!}px`;
+  if (row === undefined && col === undefined) return undefined;
+  if (row !== undefined && col !== undefined) {
+    if (row === col) return row ? `${row}px` : undefined;
+    return `${row}px ${col}px`;
+  }
+  const single = (row ?? col)!;
+  return single ? `${single}px` : undefined;
 }
 
 // interpret sizing
@@ -212,12 +225,27 @@ function buildSimplifiedLayoutValues(
     if (n.layoutPositioning === "ABSOLUTE") {
       layoutValues.position = "absolute";
     }
-    if (n.absoluteBoundingBox && parent.absoluteBoundingBox) {
-      layoutValues.locationRelativeToParent = {
-        x: pixelRound(n.absoluteBoundingBox.x - parent.absoluteBoundingBox.x),
-        y: pixelRound(n.absoluteBoundingBox.y - parent.absoluteBoundingBox.y),
-      };
+    // Emit Figma layout constraints so consumers know how this node anchors
+    // or scales when its parent frame resizes (LEFT, RIGHT, CENTER, LEFT_RIGHT, SCALE etc.)
+    if ("constraints" in n && n.constraints && typeof n.constraints === "object") {
+      const c = n.constraints as LayoutConstraint;
+      if (c.horizontal && c.vertical) {
+        layoutValues.constraints = {
+          horizontal: c.horizontal,
+          vertical: c.vertical,
+        };
+      }
     }
+  }
+
+  // Parent-relative position — emitted for ALL children (auto-layout and absolute alike)
+  // whenever both the node and its parent have bounding box data. This gives "top / left
+  // from parent" for every node in the tree regardless of layout mode.
+  if (isLayout(parent) && n.absoluteBoundingBox && parent.absoluteBoundingBox) {
+    layoutValues.locationRelativeToParent = {
+      x: pixelRound(n.absoluteBoundingBox.x - parent.absoluteBoundingBox.x),
+      y: pixelRound(n.absoluteBoundingBox.y - parent.absoluteBoundingBox.y),
+    };
   }
 
   // Handle dimensions based on layout growth and alignment

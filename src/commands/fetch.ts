@@ -1,5 +1,7 @@
+import { resolve as resolvePath } from "path";
 import { type Command, command } from "cleye";
 import {
+  envStr,
   loadEnvFile,
   parseOutputFormat,
   resolveAuth,
@@ -32,11 +34,13 @@ export const fetchCommand: Command = command(
       },
       json: {
         type: Boolean,
-        description: "Output JSON instead of YAML. Back-compat alias for --format=json.",
+        description:
+          "Output native-json instead of native-yaml. Back-compat alias for --format=native-json.",
       },
       format: {
         type: String,
-        description: "Output format: yaml (default), json, or tree (experimental).",
+        description:
+          "Output format: native-yaml (default, fully inlined — no globalVars indirection), native-json, yaml (legacy, globalVars-ref based), json, or tree (experimental).",
       },
       figmaApiKey: {
         type: String,
@@ -49,6 +53,21 @@ export const fetchCommand: Command = command(
       env: {
         type: String,
         description: "Path to .env file",
+      },
+      colorTokensDir: {
+        type: String,
+        description:
+          "Directory containing DTCG color token JSON exports (e.g. Light.tokens.json, Dark.tokens.json) used to resolve Figma Variable-bound fills to friendly names before falling back to the live Variables API.",
+      },
+      downloadIcons: {
+        type: Boolean,
+        description:
+          "Auto-download every icon (IMAGE-SVG node) in the fetched tree as a vector PDF into --image-dir, and stamp iconFile on each icon node in the output.",
+      },
+      imageDir: {
+        type: String,
+        description:
+          "Base directory for icon PDFs when --download-icons is set. Defaults to the current working directory.",
       },
       noTelemetry: {
         type: Boolean,
@@ -76,6 +95,9 @@ async function run(
     figmaApiKey?: string;
     figmaOauthToken?: string;
     env?: string;
+    colorTokensDir?: string;
+    downloadIcons?: boolean;
+    imageDir?: string;
     noTelemetry?: boolean;
   },
   positionals: string[],
@@ -116,15 +138,20 @@ async function run(
 
   const mode = authMode(auth);
   const outputFormat: OutputFormat =
-    parseOutputFormat(flags.format, "--format") ?? (flags.json ? "json" : "yaml");
+    parseOutputFormat(flags.format, "--format") ?? (flags.json ? "native-json" : "native-yaml");
+  const colorTokensDirRaw = flags.colorTokensDir ?? envStr("FIGMA_COLOR_TOKENS_DIR");
+  const colorTokensDir = colorTokensDirRaw ? resolvePath(colorTokensDirRaw) : undefined;
+  const imageDir = resolvePath(flags.imageDir ?? envStr("IMAGE_DIR") ?? process.cwd());
 
   const result = await getFigmaData(
     new FigmaService(auth),
-    { fileKey, nodeId, depth: flags.depth },
+    { fileKey, nodeId, depth: flags.depth, downloadIcons: flags.downloadIcons },
     outputFormat,
     {
       onComplete: (outcome) =>
         captureGetFigmaDataCall(outcome, { transport: "cli", authMode: mode }),
+      colorTokensDir,
+      imageDir,
     },
   );
   console.log(result.formatted);

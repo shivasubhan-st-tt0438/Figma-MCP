@@ -22,6 +22,7 @@ export interface ServerFlags {
   skipImageDownloads?: boolean;
   imageDir?: string;
   proxy?: string;
+  colorTokensDir?: string;
   stdio?: boolean;
   noTelemetry?: boolean;
 }
@@ -34,6 +35,7 @@ export interface ServerConfig {
   outputFormat: OutputFormat;
   skipImageDownloads: boolean;
   imageDir: string;
+  colorTokensDir: string | undefined;
   isStdioMode: boolean;
   noTelemetry: boolean;
   configSources: Record<string, Source>;
@@ -166,12 +168,18 @@ export function getServerConfig(flags: ServerFlags): ServerConfig {
   // correctly respects NO_PROXY exclusions.
   const proxy = resolve(flags.proxy, envStr("FIGMA_PROXY"), undefined);
 
+  const colorTokensDir = resolve(
+    flags.colorTokensDir ? resolvePath(flags.colorTokensDir) : undefined,
+    envStr("FIGMA_COLOR_TOKENS_DIR") ? resolvePath(envStr("FIGMA_COLOR_TOKENS_DIR")!) : undefined,
+    undefined,
+  );
+
   // --format wins; --json is a back-compat alias for --format=json. Invalid
   // user-supplied values fail loudly at startup rather than silently coercing.
   const formatFromFlag =
-    parseOutputFormat(flags.format, "--format") ?? (flags.json ? "json" : undefined);
+    parseOutputFormat(flags.format, "--format") ?? (flags.json ? "native-json" : undefined);
   const formatFromEnv = parseOutputFormat(envStr("OUTPUT_FORMAT"), "OUTPUT_FORMAT");
-  const outputFormat = resolve<OutputFormat>(formatFromFlag, formatFromEnv, "yaml");
+  const outputFormat = resolve<OutputFormat>(formatFromFlag, formatFromEnv, "native-yaml");
 
   const isStdioMode = flags.stdio === true;
 
@@ -193,6 +201,7 @@ export function getServerConfig(flags: ServerFlags): ServerConfig {
     outputFormat: outputFormat.source,
     skipImageDownloads: skipImageDownloads.source,
     imageDir: imageDir.source,
+    colorTokensDir: colorTokensDir.source,
     telemetry: telemetrySource,
   };
 
@@ -235,6 +244,7 @@ export function getServerConfig(flags: ServerFlags): ServerConfig {
     outputFormat: outputFormat.value,
     skipImageDownloads: skipImageDownloads.value,
     imageDir: imageDir.value,
+    colorTokensDir: colorTokensDir.value,
     isStdioMode,
     noTelemetry,
     configSources,

@@ -21,7 +21,8 @@ import {
   simplifyPropertyReferences,
 } from "~/transformers/component.js";
 import { hasFlexLayout, hasValue, isRectangleCornerRadii } from "~/utils/identity.js";
-import { generateVarId, isVisible, stableStringify } from "~/utils/common.js";
+import { generateVarId, isVisible, pixelRound, stableStringify } from "~/utils/common.js";
+import { slugifyPath } from "~/utils/slugify.js";
 import type { Node as FigmaDocumentNode } from "@figma/rest-api-spec";
 
 // Reverse lookup cache: serialized style value → varId.
@@ -83,7 +84,14 @@ function registerStyle(
 ): string {
   const styleMatch = getStyleMatch(node, context, styleKeys);
   if (styleMatch) {
-    const styleKey = resolveStyleKey(context, styleMatch, value);
+    // Named fill/stroke styles are normalized to the same snake_case scheme
+    // the variable-resolution pass produces, so a named style
+    // "❌ Text/Secondary" and a variable-bound "text_secondary" converge on
+    // one naming convention. Text/effect/layout style names keep their
+    // designer-facing form ("Body/Regular").
+    const name =
+      prefix === "fill" ? slugifyPath(styleMatch.name) || styleMatch.name : styleMatch.name;
+    const styleKey = resolveStyleKey(context, { name, id: styleMatch.id }, value);
     context.globalVars.styles[styleKey] = value;
     return styleKey;
   }
@@ -158,11 +166,40 @@ export const visualsExtractor: ExtractorFn = (node, result, context) => {
 
   // fills
   if (hasValue("fills", node) && Array.isArray(node.fills) && node.fills.length) {
-    const fills = node.fills
-      .filter(isVisible)
-      .map((fill) => parsePaint(fill, hasChildren))
-      .reverse();
+    const visiblePaints = node.fills.filter(isVisible);
+    const fills = visiblePaints.map((fill) => parsePaint(fill, hasChildren)).reverse();
     result.fills = registerStyle(node, context, fills, ["fill", "fills"], "fill");
+
+    // Capture per-paint Figma Variable bindings, keyed by index into the
+    // final (filtered + reversed) fills array. Paint-level boundVariables is
+    // the authoritative source; the node-level boundVariables.fills array is
+    // the older encoding and used as a fallback for its first entry. These
+    // IDs are resolved to friendly token names in a later pass
+    // (resolveVariableFillNames); anything unresolvable stays on the node as
+    // a diagnostic.
+    const bindings: Record<number, string> = {};
+    const nodeLevelBinding =
+      "boundVariables" in node &&
+      node.boundVariables &&
+      typeof node.boundVariables === "object" &&
+      "fills" in node.boundVariables
+        ? ((node.boundVariables as { fills?: unknown }).fills as
+            | { type?: string; id?: string }[]
+            | undefined)
+        : undefined;
+
+    visiblePaints.forEach((paint, rawIndex) => {
+      const paintAlias = (paint as { boundVariables?: { color?: { type?: string; id?: string } } })
+        .boundVariables?.color;
+      const fallbackAlias = rawIndex === 0 ? nodeLevelBinding?.[0] : undefined;
+      const alias = paintAlias ?? fallbackAlias;
+      if (alias?.type === "VARIABLE_ALIAS" && alias.id) {
+        bindings[visiblePaints.length - 1 - rawIndex] = alias.id;
+      }
+    });
+    if (Object.keys(bindings).length > 0) {
+      result.fillVariableIds = bindings;
+    }
   }
 
   // strokes
@@ -280,12 +317,94 @@ function resolveStyleKey(
   return `${styleMatch.name} (${styleMatch.id})`;
 }
 
+// -------------------- NODE METADATA EXTRACTOR --------------------
+
+/**
+ * Extracts spatial and structural metadata for every node:
+ * - parentId / parentName: which component/frame is the immediate parent
+ * - siblingIndex: zero-based position among the parent's children
+ * - absoluteBoundingBox: width, height (canvas-absolute size only)
+ * - rotation: non-zero rotation in degrees
+ * - blendMode: only when not the default (NORMAL / PASS_THROUGH)
+ * - strokeAlign: INSIDE, OUTSIDE, or CENTER
+ * - visible: only when false — this node exists in the design but is
+ *   currently hidden (see shouldProcessNode in node-walker.ts, which no
+ *   longer drops hidden nodes outright). A hidden node is often real app
+ *   state — a badge/avatar/icon toggled off in this instance — not
+ *   decorative cruft, so it stays in the tree with this flag rather than
+ *   vanishing with no trace.
+ */
+export const nodeMetaExtractor: ExtractorFn = (node, result, context) => {
+  // Parent reference — makes the tree self-documenting
+  if (context.parent) {
+    result.parentId = context.parent.id;
+    result.parentName = context.parent.name;
+  }
+
+  // Zero-based order among siblings
+  if (context.siblingIndex !== undefined) {
+    result.siblingIndex = context.siblingIndex;
+  }
+
+  // Only width/height are emitted — x/y are Figma's canvas-absolute position
+  // (where this frame sits among unrelated frames scattered across the
+  // designer's boundless canvas), which no native UI can use and nothing in
+  // this codebase reads back. Relative position within an auto-layout-free
+  // parent is already captured separately as `layout.locationRelativeToParent`,
+  // computed from the raw node's x/y before this simplified value exists.
+  if ("absoluteBoundingBox" in node && node.absoluteBoundingBox) {
+    result.absoluteBoundingBox = {
+      width: pixelRound(node.absoluteBoundingBox.width),
+      height: pixelRound(node.absoluteBoundingBox.height),
+    };
+  }
+
+  // Rotation — only when non-zero
+  if ("rotation" in node && typeof node.rotation === "number" && node.rotation !== 0) {
+    result.rotation = node.rotation;
+  }
+
+  // Blend mode — only when non-default
+  if (
+    "blendMode" in node &&
+    typeof node.blendMode === "string" &&
+    node.blendMode !== "PASS_THROUGH" &&
+    node.blendMode !== "NORMAL"
+  ) {
+    result.blendMode = node.blendMode;
+  }
+
+  // Visibility — only when hidden; omitted entirely for the common visible case
+  if (!isVisible(node)) {
+    result.visible = false;
+  }
+
+  // Stroke alignment (INSIDE / OUTSIDE / CENTER) — only meaningful when the
+  // node actually has a visible stroke; the field exists on every shape node
+  // regardless, and emitting it for stroke-less nodes is pure noise.
+  if (
+    "strokeAlign" in node &&
+    typeof node.strokeAlign === "string" &&
+    hasValue("strokes", node) &&
+    Array.isArray(node.strokes) &&
+    node.strokes.some(isVisible)
+  ) {
+    result.strokeAlign = node.strokeAlign as "INSIDE" | "OUTSIDE" | "CENTER";
+  }
+};
+
 // -------------------- CONVENIENCE COMBINATIONS --------------------
 
 /**
  * All extractors - replicates the current parseNode behavior.
  */
-export const allExtractors = [layoutExtractor, textExtractor, visualsExtractor, componentExtractor];
+export const allExtractors = [
+  nodeMetaExtractor,
+  layoutExtractor,
+  textExtractor,
+  visualsExtractor,
+  componentExtractor,
+];
 
 /**
  * Layout and text only - useful for content analysis and layout planning.

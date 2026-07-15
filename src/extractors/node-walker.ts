@@ -1,5 +1,4 @@
 import type { Node as FigmaDocumentNode } from "@figma/rest-api-spec";
-import { isVisible } from "~/utils/common.js";
 import { hasValue } from "~/utils/identity.js";
 import type { Style } from "@figma/rest-api-spec";
 import type {
@@ -98,21 +97,21 @@ async function processNodeWithExtractors(
       ...context,
       currentDepth: context.currentDepth + 1,
       parent: node,
-      // COMPONENT nodes define properties; INSTANCE nodes resolve them
-      insideComponentDefinition:
-        node.type === "COMPONENT" || node.type === "COMPONENT_SET"
-          ? true
-          : node.type === "INSTANCE"
-            ? false
-            : context.insideComponentDefinition,
     };
 
     // Use the same pattern as the existing parseNode function
     if (hasValue("children", node) && node.children.length > 0) {
       const children: SimplifiedNode[] = [];
-      for (const child of node.children) {
+      for (let siblingIdx = 0; siblingIdx < node.children.length; siblingIdx++) {
+        const child = node.children[siblingIdx];
         if (!shouldProcessNode(child, childContext, options)) continue;
-        const processed = await processNodeWithExtractors(child, extractors, childContext, options);
+        const childContextWithSibling = { ...childContext, siblingIndex: siblingIdx };
+        const processed = await processNodeWithExtractors(
+          child,
+          extractors,
+          childContextWithSibling,
+          options,
+        );
         if (processed !== null) children.push(processed);
       }
 
@@ -134,24 +133,18 @@ async function processNodeWithExtractors(
 
 /**
  * Determine if a node should be processed based on filters.
+ *
+ * Hidden nodes are NOT filtered out here — a hidden node is frequently real
+ * app state (a badge/avatar/icon toggled off in this instance), not
+ * decorative Figma cruft, and dropping it silently means a consumer never
+ * learns it exists. nodeMetaExtractor stamps `visible: false` on it instead;
+ * the tree just keeps it.
  */
 function shouldProcessNode(
   node: FigmaDocumentNode,
-  context: TraversalContext,
+  _context: TraversalContext,
   options: TraversalOptions,
 ): boolean {
-  if (!isVisible(node)) {
-    // Rescue hidden nodes controlled by a boolean property inside component definitions
-    const hasVisibleRef =
-      "componentPropertyReferences" in node &&
-      node.componentPropertyReferences &&
-      typeof node.componentPropertyReferences === "object" &&
-      "visible" in node.componentPropertyReferences;
-    if (!(hasVisibleRef && context.insideComponentDefinition)) {
-      return false;
-    }
-  }
-
   if (options.nodeFilter && !options.nodeFilter(node)) {
     return false;
   }

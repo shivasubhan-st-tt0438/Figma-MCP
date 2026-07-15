@@ -319,7 +319,11 @@ export function parsePaint(raw: Paint, hasChildren: boolean = false): Simplified
     if (opacity === 1) {
       return hex;
     } else {
-      return formatRGBAColor(raw.color!, opacity);
+      // Pass the RAW paint opacity, not the effective alpha convertColor
+      // returned — formatRGBAColor multiplies by color.a itself, so passing
+      // the already-multiplied value would apply color.a twice (a 0.6-alpha
+      // color came out as 0.36).
+      return formatRGBAColor(raw.color!, raw.opacity);
     }
   } else if (raw.type === "PATTERN") {
     return parsePatternPaint(raw);

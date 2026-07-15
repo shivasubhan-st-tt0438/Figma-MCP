@@ -51,15 +51,18 @@ describe("extractFromDesign", () => {
   it("produces correct node structure from a nested tree", async () => {
     const { nodes } = await extractFromDesign(fixtureNodes, allExtractors);
 
-    // Top-level: Header, Body, Icon (3 nodes — Bg is invisible, filtered out)
+    // Top-level: Header, Body, Icon (3 nodes)
     expect(nodes).toHaveLength(3);
     expect(nodes.map((n) => n.name)).toEqual(["Header", "Body", "Icon"]);
 
-    // Header has 1 child (Title only — Bg is invisible)
+    // Header has 2 children — Bg is hidden but stays in the tree, flagged visible: false
     const header = nodes[0];
-    expect(header.children).toHaveLength(1);
+    expect(header.children).toHaveLength(2);
     expect(header.children![0].name).toBe("Title");
     expect(header.children![0].text).toBe("Hello");
+    expect(header.children![0].visible).toBeUndefined();
+    expect(header.children![1].name).toBe("Bg");
+    expect(header.children![1].visible).toBe(false);
 
     // Body > Card > Label
     const body = nodes[1];
@@ -80,7 +83,7 @@ describe("extractFromDesign", () => {
 
     // At depth 0 we get top-level nodes, depth 1 gets their direct children, no deeper
     const header = nodes.find((n) => n.name === "Header")!;
-    expect(header.children).toHaveLength(1);
+    expect(header.children).toHaveLength(2);
     expect(header.children![0].name).toBe("Title");
 
     // Body's child "Card" is at depth 1 — it should exist but have no children
@@ -321,7 +324,7 @@ describe("collapseSvgContainers", () => {
 });
 
 describe("component property support", () => {
-  it("rescues hidden nodes with componentPropertyReferences.visible inside components", async () => {
+  it("keeps hidden nodes with componentPropertyReferences.visible inside components, flagged visible: false", async () => {
     const componentNode = makeNode({
       id: "10:1",
       name: "Card",
@@ -346,10 +349,11 @@ describe("component property support", () => {
 
     const badge = card.children!.find((c) => c.name === "Badge")!;
     expect(badge).toBeDefined();
+    expect(badge.visible).toBe(false);
     expect(badge.componentPropertyReferences).toEqual({ visible: "Show Badge" });
   });
 
-  it("strips hidden nodes normally inside instances", async () => {
+  it("keeps hidden nodes inside instances too, flagged visible: false", async () => {
     const instanceNode = makeNode({
       id: "11:1",
       name: "Card Instance",
@@ -367,8 +371,10 @@ describe("component property support", () => {
     const { nodes } = await extractFromDesign([instanceNode], allExtractors);
 
     const instance = nodes[0];
-    expect(instance.children).toHaveLength(1);
+    expect(instance.children).toHaveLength(2);
     expect(instance.children![0].name).toBe("Title");
+    expect(instance.children![1].name).toBe("Badge");
+    expect(instance.children![1].visible).toBe(false);
   });
 
   it("collects componentPropertyDefinitions during traversal", async () => {
@@ -436,7 +442,7 @@ describe("component property support", () => {
     });
   });
 
-  it("strips hidden children inside nested instances within components", async () => {
+  it("keeps hidden children inside nested instances within components, flagged visible: false", async () => {
     const componentNode = makeNode({
       id: "15:1",
       name: "Wrapper",
@@ -460,8 +466,10 @@ describe("component property support", () => {
     const nestedInstance = nodes[0].children![0];
     expect(nestedInstance).toBeDefined();
     expect(nestedInstance.name).toBe("Nested Instance");
-    expect(nestedInstance.children).toHaveLength(1);
+    expect(nestedInstance.children).toHaveLength(2);
     expect(nestedInstance.children![0].name).toBe("Visible Child");
+    expect(nestedInstance.children![1].name).toBe("Hidden Child");
+    expect(nestedInstance.children![1].visible).toBe(false);
   });
 });
 

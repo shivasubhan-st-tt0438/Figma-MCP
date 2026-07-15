@@ -15,6 +15,17 @@ import {
   countNamedStyles,
   detectVariables,
 } from "~/services/get-figma-data-metrics.js";
+import { resolveVariableFillNames } from "~/services/resolve-variable-names.js";
+import { loadColorTokensDir } from "~/services/color-tokens-file.js";
+import { loadAppkitColorHints } from "~/services/design-hints.js";
+import {
+  parseVariantProperties,
+  enrichComponentSetDefinitions,
+  resolveComponentLibraries,
+  annotateSfSymbols,
+  addConsumptionGuide,
+} from "~/services/enrich-design.js";
+import { downloadIcons } from "~/services/download-icons.js";
 
 export type { GetFigmaDataMetrics } from "~/services/get-figma-data-metrics.js";
 
@@ -22,6 +33,12 @@ export type GetFigmaDataInput = {
   fileKey: string;
   nodeId?: string;
   depth?: number;
+  /**
+   * Auto-download every icon (IMAGE-SVG node) in the fetched tree as a vector
+   * PDF into hooks.imageDir, and stamp iconFile on each one — see
+   * download-icons.ts. Requires hooks.imageDir; silently skipped without it.
+   */
+  downloadIcons?: boolean;
 };
 
 export type GetFigmaDataResult = {
@@ -59,6 +76,14 @@ export type GetFigmaDataHooks = {
    * broken observer must never break the pipeline.
    */
   onComplete?: (outcome: GetFigmaDataOutcome) => void;
+  /**
+   * Optional directory of DTCG color token JSON exports (e.g. "Light.tokens.json",
+   * "Dark.tokens.json") used to resolve Figma Variable-bound fills to friendly
+   * names before falling back to the live Variables API. See resolveVariableFillNames.
+   */
+  colorTokensDir?: string;
+  /** Base directory for icon PDFs when input.downloadIcons is set. See download-icons.ts. */
+  imageDir?: string;
 };
 
 /**
@@ -76,7 +101,7 @@ export async function getFigmaData(
   outputFormat: OutputFormat,
   hooks: GetFigmaDataHooks = {},
 ): Promise<GetFigmaDataResult> {
-  const { fileKey, nodeId, depth } = input;
+  const { fileKey, nodeId, depth, downloadIcons: shouldDownloadIcons } = input;
   const startedAt = Date.now();
   let metrics: GetFigmaDataMetrics | undefined;
   let caughtError: unknown;
@@ -112,6 +137,34 @@ export async function getFigmaData(
         afterChildren: collapseSvgContainers,
         nodeCounter,
       });
+      // Best-effort: replace auto-generated fill_XXXXXX names with the real Figma
+      // Variable name wherever a bound variable can be resolved. Tries local DTCG
+      // color token files first (free, unambiguous ID match, with a hex+alpha
+      // fallback), then the live Variables API for anything still unresolved.
+      // Silently falls back to the synthetic name (today's behavior) if neither
+      // source can resolve a given variable.
+      const localTokens = loadColorTokensDir(hooks.colorTokensDir);
+      const appkitHints = loadAppkitColorHints(hooks.colorTokensDir);
+      simplifiedDesign = await resolveVariableFillNames(
+        simplifiedDesign,
+        figmaService,
+        fileKey,
+        localTokens,
+        appkitHints,
+      );
+
+      // Enrichment passes: structured variant state, component-set property
+      // definitions (one extra batched /nodes call), component source
+      // libraries (native vs. custom, resolved via the published-components
+      // API), and SF Symbol names for private-use glyphs. All best-effort.
+      parseVariantProperties(simplifiedDesign);
+      await enrichComponentSetDefinitions(simplifiedDesign, figmaService, fileKey);
+      await resolveComponentLibraries(simplifiedDesign, figmaService);
+      annotateSfSymbols(simplifiedDesign);
+      if (shouldDownloadIcons && hooks.imageDir) {
+        await downloadIcons(simplifiedDesign, figmaService, fileKey, hooks.imageDir);
+      }
+      addConsumptionGuide(simplifiedDesign, outputFormat);
     } catch (error) {
       tagError(error, { phase: "simplify" });
     } finally {

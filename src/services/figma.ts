@@ -2,7 +2,13 @@ import type {
   GetImagesResponse,
   GetFileResponse,
   GetFileNodesResponse,
+  GetFileMetaResponse,
   GetImageFillsResponse,
+  GetCommentsResponse,
+  GetComponentResponse,
+  GetComponentSetResponse,
+  GetFileVersionsResponse,
+  GetLocalVariablesResponse,
   Transform,
 } from "@figma/rest-api-spec";
 import { downloadAndProcessImage, type ImageProcessingResult } from "~/utils/image-processing.js";
@@ -133,7 +139,7 @@ export class FigmaService {
   async getNodeRenderUrls(
     fileKey: string,
     nodeIds: string[],
-    format: "png" | "svg",
+    format: "png" | "svg" | "pdf",
     options: { pngScale?: number; svgOptions?: SvgOptions } = {},
   ): Promise<Record<string, string>> {
     if (nodeIds.length === 0) return {};
@@ -141,6 +147,12 @@ export class FigmaService {
     if (format === "png") {
       const scale = options.pngScale || 2;
       const endpoint = `/images/${fileKey}?ids=${nodeIds.join(",")}&format=png&scale=${scale}`;
+      const response = await this.request<GetImagesResponse>(endpoint);
+      return this.filterValidImages(response.images);
+    } else if (format === "pdf") {
+      // PDF export is a native Figma format — vectors stay resolution
+      // independent and Jimp never touches the bytes (it can't read PDF).
+      const endpoint = `/images/${fileKey}?ids=${nodeIds.join(",")}&format=pdf`;
       const response = await this.request<GetImagesResponse>(endpoint);
       return this.filterValidImages(response.images);
     } else {
@@ -339,5 +351,72 @@ export class FigmaService {
     writeLogs("figma-raw.json", result.data);
 
     return result;
+  }
+
+  /**
+   * Get published metadata for a component by its stable key. The interesting
+   * field is `meta.file_key` — the library file the component was published
+   * from, which is how instances are traced back to their source library
+   * (e.g. Apple's "macOS 15 Sequoia" UI kit vs. a team's own design system).
+   */
+  async getComponentByKey(key: string): Promise<GetComponentResponse> {
+    const endpoint = `/components/${key}`;
+    Logger.log(`Retrieving published component: ${key}`);
+    return this.request<GetComponentResponse>(endpoint);
+  }
+
+  /**
+   * Get published metadata for a component set by its stable key. Same role
+   * as getComponentByKey but for variant sets — one call covers every
+   * variant, so prefer this when the component belongs to a set.
+   */
+  async getComponentSetByKey(key: string): Promise<GetComponentSetResponse> {
+    const endpoint = `/component_sets/${key}`;
+    Logger.log(`Retrieving published component set: ${key}`);
+    return this.request<GetComponentSetResponse>(endpoint);
+  }
+
+  /**
+   * Get lightweight metadata (name, editor type, …) for a file without
+   * fetching its document tree. Used to resolve a library file_key to its
+   * human-readable library name.
+   */
+  async getFileMeta(fileKey: string): Promise<GetFileMetaResponse> {
+    const endpoint = `/files/${fileKey}/meta`;
+    Logger.log(`Retrieving file metadata: ${fileKey}`);
+    // Some API versions wrap the payload in { file: {...} }; the spec types it
+    // flat. Tolerate both so a wrapper change never breaks library resolution.
+    const data = await this.request<GetFileMetaResponse & { file?: GetFileMetaResponse }>(endpoint);
+    return data.file ?? data;
+  }
+
+  /**
+   * Get all comments for a Figma file.
+   */
+  async getComments(fileKey: string): Promise<GetCommentsResponse> {
+    const endpoint = `/files/${fileKey}/comments`;
+    Logger.log(`Retrieving comments for file: ${fileKey}`);
+    return this.request<GetCommentsResponse>(endpoint);
+  }
+
+  /**
+   * Get the version history for a Figma file.
+   */
+  async getVersionHistory(fileKey: string): Promise<GetFileVersionsResponse> {
+    const endpoint = `/files/${fileKey}/versions`;
+    Logger.log(`Retrieving version history for file: ${fileKey}`);
+    return this.request<GetFileVersionsResponse>(endpoint);
+  }
+
+  /**
+   * Get all local Variables and Variable Collections defined in a Figma file.
+   * Requires the `file_variables:read` token scope and a Figma plan that supports
+   * Variables (Organization/Enterprise, or Professional with a paid seat) —
+   * otherwise the API returns 403 with a message naming the missing scope.
+   */
+  async getVariables(fileKey: string): Promise<GetLocalVariablesResponse> {
+    const endpoint = `/files/${fileKey}/variables/local`;
+    Logger.log(`Retrieving local variables for file: ${fileKey}`);
+    return this.request<GetLocalVariablesResponse>(endpoint);
   }
 }

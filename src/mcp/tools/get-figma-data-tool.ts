@@ -34,6 +34,12 @@ const parameters = {
     .describe(
       "OPTIONAL. Do NOT use unless explicitly requested by the user. Controls how many levels deep to traverse the node tree.",
     ),
+  downloadIcons: z
+    .boolean()
+    .optional()
+    .describe(
+      "Auto-download every icon (IMAGE-SVG node) in the fetched tree as a vector PDF into the server's image directory, and stamp iconFile (the saved filename) on each icon node in the response — no separate download_figma_images call needed per icon. Recommended whenever this fetch is for implementing or comparing UI, not for a quick structural read.",
+    ),
 };
 
 const parametersSchema = z.object(parameters);
@@ -47,9 +53,11 @@ async function getFigmaData(
   authMode: AuthMode,
   clientInfo: ClientInfo | undefined,
   extra: ToolExtra,
+  colorTokensDir?: string,
+  imageDir?: string,
 ) {
   try {
-    const { fileKey, nodeId: rawNodeId, depth } = parametersSchema.parse(params);
+    const { fileKey, nodeId: rawNodeId, depth, downloadIcons } = parametersSchema.parse(params);
 
     // Replace - with : in nodeId for our query — Figma API expects :.
     // MCP-specific input quirk, so it lives here rather than in the shared core.
@@ -64,30 +72,37 @@ async function getFigmaData(
     let stopFetchHeartbeat: (() => Promise<void>) | undefined;
     let stopSimplifyHeartbeat: (() => Promise<void>) | undefined;
 
-    const result = await runGetFigmaData(figmaService, { fileKey, nodeId, depth }, outputFormat, {
-      onFetchStart: async () => {
-        await sendProgress(extra, 0, 3, "Fetching design data from Figma API");
-        stopFetchHeartbeat = startProgressHeartbeat(extra, "Waiting for Figma API response");
+    const result = await runGetFigmaData(
+      figmaService,
+      { fileKey, nodeId, depth, downloadIcons },
+      outputFormat,
+      {
+        colorTokensDir,
+        imageDir,
+        onFetchStart: async () => {
+          await sendProgress(extra, 0, 3, "Fetching design data from Figma API");
+          stopFetchHeartbeat = startProgressHeartbeat(extra, "Waiting for Figma API response");
+        },
+        onFetchComplete: async () => {
+          await stopFetchHeartbeat?.();
+        },
+        onSimplifyStart: async (progress) => {
+          await sendProgress(extra, 1, 3, "Fetched design data, simplifying");
+          stopSimplifyHeartbeat = startProgressHeartbeat(
+            extra,
+            () => `Simplifying design data (${progress.getNodeCount()} nodes processed)`,
+          );
+        },
+        onSimplifyComplete: async () => {
+          await stopSimplifyHeartbeat?.();
+        },
+        onSerializeStart: async () => {
+          await sendProgress(extra, 2, 3, "Simplified design, serializing response");
+        },
+        onComplete: (outcome) =>
+          captureGetFigmaDataCall(outcome, { transport, authMode, clientInfo }),
       },
-      onFetchComplete: async () => {
-        await stopFetchHeartbeat?.();
-      },
-      onSimplifyStart: async (progress) => {
-        await sendProgress(extra, 1, 3, "Fetched design data, simplifying");
-        stopSimplifyHeartbeat = startProgressHeartbeat(
-          extra,
-          () => `Simplifying design data (${progress.getNodeCount()} nodes processed)`,
-        );
-      },
-      onSimplifyComplete: async () => {
-        await stopSimplifyHeartbeat?.();
-      },
-      onSerializeStart: async () => {
-        await sendProgress(extra, 2, 3, "Simplified design, serializing response");
-      },
-      onComplete: (outcome) =>
-        captureGetFigmaDataCall(outcome, { transport, authMode, clientInfo }),
-    });
+    );
 
     Logger.log(`Successfully extracted data: ${result.metrics.simplifiedNodeCount} nodes`);
     Logger.log("Sending result to client");

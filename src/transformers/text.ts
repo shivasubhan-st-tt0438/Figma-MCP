@@ -59,8 +59,17 @@ export function extractTextStyle(n: FigmaDocumentNode) {
           ? `${pixelRound((style.letterSpacing / style.fontSize) * 100)}%`
           : undefined,
       textCase: style.textCase,
-      textAlignHorizontal: style.textAlignHorizontal,
-      textAlignVertical: style.textAlignVertical,
+      // Alignments only when non-default (LEFT / TOP) — same omit-when-default
+      // convention as rotation/blendMode/visible, so the common case costs
+      // nothing in the output.
+      textAlignHorizontal:
+        style.textAlignHorizontal && style.textAlignHorizontal !== "LEFT"
+          ? style.textAlignHorizontal
+          : undefined,
+      textAlignVertical:
+        style.textAlignVertical && style.textAlignVertical !== "TOP"
+          ? style.textAlignVertical
+          : undefined,
       italic: "italic" in style && style.italic ? true : undefined,
       textDecoration:
         "textDecoration" in style &&

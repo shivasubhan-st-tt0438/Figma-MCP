@@ -32,12 +32,12 @@ const argv = cli({
     json: {
       type: Boolean,
       description:
-        "Output data from tools in JSON format instead of YAML. Back-compat alias for --format=json.",
+        "Output native-json instead of native-yaml. Back-compat alias for --format=native-json.",
     },
     format: {
       type: String,
       description:
-        "Output format for design data: yaml (default), json, or tree (experimental compact format).",
+        "Output format for design data: native-yaml (default, fully inlined styles + role tags, no globalVars indirection), native-json, yaml (legacy, globalVars-ref based), json, or tree (experimental compact format).",
     },
     skipImageDownloads: {
       type: Boolean,
@@ -52,6 +52,11 @@ const argv = cli({
       type: String,
       description:
         "HTTP proxy URL for networks that require a proxy (e.g. http://proxy:8080). Pass 'none' to ignore HTTP_PROXY/HTTPS_PROXY from the environment and connect directly.",
+    },
+    colorTokensDir: {
+      type: String,
+      description:
+        "Directory containing DTCG color token JSON exports (e.g. Light.tokens.json, Dark.tokens.json) used to resolve Figma Variable-bound fills to friendly names before falling back to the live Variables API.",
     },
     stdio: {
       type: Boolean,
