@@ -138,6 +138,26 @@ export interface SimplifiedDesign {
    * token indirection) must travel with the data.
    */
   guide?: string[];
+  /**
+   * Every variant of a component whose designer pinned a Figma-design-URL
+   * Dev Resources link (as opposed to a .swift path — see attachDevResources
+   * in enrich-design.ts) on a node present in this fetch. A screen only ever
+   * shows the one variant that's actually placed there; this carries the
+   * full state matrix (fetched fresh, in the same call) so implementing all
+   * of it doesn't require a second round-trip. Deduplicated by the link's
+   * target ({fileKey, nodeId}) — two different consuming nodes (e.g. a
+   * Cancel and an OK button that are both instances of the same component)
+   * pointing at the same reference link produce one shared entry here, not
+   * two. Each entry is already fully self-contained (styles inlined, not
+   * globalVars refs, regardless of this response's own output format) and
+   * stripped of fields that only describe this specific reference layout —
+   * siblingIndex, parentId/parentName, and the gap/padding/
+   * locationRelativeToParent that only exist to arrange documentation
+   * swatches — since none of that is real app layout. Loosely typed (not
+   * SimplifiedNode) because the shape is post-inlining (see NativeNode in
+   * native-json.ts) — importing that type here would create a cycle.
+   */
+  componentVariantReferences?: Record<string, unknown>[];
 }
 
 export interface SimplifiedNode {
@@ -191,18 +211,35 @@ export interface SimplifiedNode {
    * download_figma_images call needed for this icon.
    */
   iconFile?: string;
+  /**
+   * This node already has a real Swift implementation — a designer pinned a
+   * Dev Resources link ending in .swift (Figma's widget requires something
+   * URL-shaped, so a bare file path gets an "https://" prefix bolted on to
+   * pass validation; stripped here). `file` is its repo-relative path.
+   * `symbol` is the raw name the designer typed — NOT guaranteed to be a
+   * class: Figma's Dev Resources panel is free text, so the naming
+   * CONVENTION is what gives it structure. `scopePath` (present only when
+   * `symbol` contains "_") splits it into an outermost-to-innermost scope
+   * chain: "ClassName" (just symbol, no scopePath) = the type itself;
+   * "ClassName_variableName" = a property inside it; "ClassName_
+   * functionName_variableName" = a variable inside a method;
+   * "functionName_variableName" = a variable inside a free function (no
+   * class). Resolve it by locating the outermost element first, then
+   * searching inside it for the next — the last element is the exact
+   * declaration. Takes priority over native — see attachDevResources in
+   * enrich-design.ts.
+   */
+  implementedBy?: { file: string; symbol: string; scopePath?: string[] }[];
   // layout & alignment
   layout?: string;
   /**
-   * Source library file name of this instance's component ("macOS 15
-   * Sequoia (Library)"), copied from its componentSet — placed on the node
-   * so a sequential reader sees it without a componentId → componentSet join.
-   */
-  library?: string;
-  /**
-   * True when `library` is Apple's macOS UI kit: the instance IS the stock
-   * AppKit control its component name describes ("Pop-Up Button" →
-   * NSPopUpButton). Absent = the design team's own custom component.
+   * True when this instance's component was published from Apple's macOS UI
+   * kit Figma library: the instance IS the stock AppKit control its
+   * component name describes ("Pop-Up Button" → NSPopUpButton). Absent = the
+   * design team's own custom component. The publishing library's own name
+   * (e.g. "macOS 15 Sequoia (Library)") is resolved internally to compute
+   * this boolean but not persisted on the node — once native/custom is
+   * decided, the library name itself has nothing left to add.
    */
   native?: boolean;
   componentId?: string;

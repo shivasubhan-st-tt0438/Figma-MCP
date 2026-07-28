@@ -41,6 +41,12 @@ export function serializeAsTree(design: SerializableDesign): string {
   }
   sections.push(lines.join("\n"));
 
+  if (design.componentVariantReferences && design.componentVariantReferences.length > 0) {
+    sections.push(
+      `\nCOMPONENT_VARIANT_REFERENCES:\n${dumpYaml(design.componentVariantReferences)}`,
+    );
+  }
+
   return sections.join("\n");
 }
 

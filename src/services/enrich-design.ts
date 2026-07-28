@@ -1,9 +1,16 @@
+import { existsSync, readFileSync } from "fs";
+import { dirname, join } from "path";
+import { fileURLToPath } from "url";
 import type { SimplifiedDesign, SimplifiedNode } from "~/extractors/types.js";
 import type { FigmaService } from "~/services/figma.js";
 import type { OutputFormat } from "~/utils/serialize.js";
 import { parseVariantName, simplifyPropertyDefinitions } from "~/transformers/component.js";
 import { SF_SYMBOL_NAMES } from "~/data/sf-symbols.js";
+import { slugify } from "~/utils/slugify.js";
 import { Logger } from "~/utils/logger.js";
+import { simplifyRawFigmaObject, allExtractors } from "~/extractors/index.js";
+import { inlineNode, type NativeNode } from "~/utils/native-json.js";
+import { tryParseFigmaUrl } from "~/utils/figma-url.js";
 
 /**
  * Post-traversal enrichment passes. Each pass adds a piece of context a
@@ -74,16 +81,29 @@ export async function enrichComponentSetDefinitions(
 }
 
 /**
- * Names Apple's official macOS UI kit Figma libraries across releases
+ * Detects Apple's official macOS UI kit Figma libraries across releases
  * ("macOS 15 Sequoia (Library)", "macOS 14 Sonoma", …). Components published
  * from these files ARE stock AppKit controls; everything else is custom.
+ *
+ * Matches "macos" at the START of the slugified name (emoji prefixes and
+ * parentheticals stripped) — NOT anywhere in it. A bare /macos/i test
+ * misclassified the design team's own component library "🧤 UI Content -
+ * macOS" as Apple's kit, stamping custom components native: true while
+ * their pinned dev resources correctly pointed at custom Swift classes.
+ * Apple names its kits with the platform first; team libraries that merely
+ * target macOS mention it elsewhere in the name.
  */
-const APPLE_MACOS_LIBRARY = /macos/i;
+function isAppleMacosLibrary(libraryName: string): boolean {
+  return slugify(libraryName).startsWith("macos");
+}
 
 /**
  * Resolve which library file every remote component was published from, and
- * stamp `library` (the file's name) + `native` (is it Apple's macOS UI kit?)
- * onto component sets, set-less components, and every INSTANCE node.
+ * stamp `native` (is it Apple's macOS UI kit?) onto component sets, set-less
+ * components, and every INSTANCE node. The library file's own name is
+ * resolved purely to make that one boolean decision — it's never persisted
+ * on the output; once native/custom is decided, the name string itself has
+ * nothing left to add downstream.
  *
  * This replaces the old name→NSClass guessing table (design-hints.ts): the
  * library is ground truth the designer can't accidentally break by renaming
@@ -148,33 +168,27 @@ export async function resolveComponentLibraries(
     }),
   );
 
-  const stamp = (target: { library?: string; native?: boolean }, componentKey: string): void => {
+  const stampNative = (target: { native?: boolean }, componentKey: string): void => {
     const fileKey = fileKeyByComponentKey.get(componentKey);
     const library = fileKey ? libraryNameByFileKey.get(fileKey) : undefined;
-    if (!library) return;
-    target.library = library;
-    if (APPLE_MACOS_LIBRARY.test(library)) target.native = true;
+    if (library && isAppleMacosLibrary(library)) target.native = true;
   };
-  for (const set of remoteSets) stamp(set, set.key);
-  for (const component of looseComponents) stamp(component, component.key);
+  for (const set of remoteSets) stampNative(set, set.key);
+  for (const component of looseComponents) stampNative(component, component.key);
 
-  const originByComponentId = new Map<string, { library?: string; native?: boolean }>();
+  const nativeComponentIds = new Set<string>();
   for (const [componentId, component] of Object.entries(design.components)) {
     const origin = component.componentSetId
       ? design.componentSets[component.componentSetId]
       : component;
-    if (origin?.library) originByComponentId.set(componentId, origin);
+    if (origin?.native) nativeComponentIds.add(componentId);
   }
-  if (originByComponentId.size === 0) return;
+  if (nativeComponentIds.size === 0) return;
 
   const visit = (nodes: SimplifiedNode[]): void => {
     for (const node of nodes) {
-      if (node.componentId) {
-        const origin = originByComponentId.get(node.componentId);
-        if (origin) {
-          node.library = origin.library;
-          if (origin.native) node.native = true;
-        }
+      if (node.componentId && nativeComponentIds.has(node.componentId)) {
+        node.native = true;
       }
       if (node.children) visit(node.children);
     }
@@ -182,8 +196,491 @@ export async function resolveComponentLibraries(
   visit(design.nodes);
 }
 
+/**
+ * Drops the children of a `native: true` instance when nothing in that
+ * subtree is worth mining. Per the "Native vs Custom Components" consumption
+ * rule, a native instance's children are Figma's own visual decomposition of
+ * a stock AppKit control (drawn cursors, chevrons, the traffic-light dots
+ * inside a native Titlebar) — real information only when one of them carries
+ * actual text or a bound property (e.g. a Title's Label child with real
+ * content); otherwise it's a redraw of something the app never builds itself
+ * (the real control draws its own chrome), pure token cost with nothing to
+ * mine.
+ *
+ * Must run after resolveComponentLibraries, which is what stamps `native` in
+ * the first place. Recurses into kept subtrees so a nested native instance
+ * (e.g. a native Window Controls INSTANCE inside a native Titlebar INSTANCE)
+ * still gets its own independent prune decision.
+ */
+export function pruneNativeDecoration(design: SimplifiedDesign): void {
+  const hasMineableContent = (nodes: SimplifiedNode[]): boolean => {
+    for (const node of nodes) {
+      if (node.text || node.componentPropertyReferences) return true;
+      if (node.children && hasMineableContent(node.children)) return true;
+    }
+    return false;
+  };
+
+  const visit = (nodes: SimplifiedNode[]): void => {
+    for (const node of nodes) {
+      if (node.native === true && node.children && !hasMineableContent(node.children)) {
+        delete node.children;
+        continue;
+      }
+      if (node.children) visit(node.children);
+    }
+  };
+  visit(design.nodes);
+}
+
+/**
+ * Whether a fetched node's id refers to the node the caller asked to focus on.
+ *
+ * The Figma REST API cannot fetch an instance-internal node (one with an
+ * `I<instance>;<local>;...` id) on its own — it only ever returns the whole
+ * instance — so the only way to scope a fetch to "just Frame 1 inside this
+ * instance" is to prune the built tree by id after the fact. But the id a
+ * caller has on hand comes in two forms, and both must resolve to the same
+ * node:
+ *   - the full compound id copied from a prior fetch's output
+ *     (e.g. "I3096:91050;1907:3787")
+ *   - the bare local id Figma's Dev Mode shows / puts in a URL when that same
+ *     frame is selected (e.g. "1907:3787" or "1907-3787")
+ * so matching is by trailing `;`-segment, not string equality, after
+ * normalizing "-" to ":" and dropping a leading "I". A single-segment focus
+ * id matches any node whose final segment equals it; a multi-segment focus id
+ * must match as a whole suffix.
+ */
+function nodeMatchesFocus(nodeId: string, focusId: string): boolean {
+  const normalize = (s: string): string => s.replace(/-/g, ":").replace(/^I/, "");
+  const node = normalize(nodeId);
+  const focus = normalize(focusId);
+  if (node === focus) return true;
+  if (node.endsWith(`;${focus}`)) return true;
+  // Single-segment focus id (no ";") against the node's innermost segment.
+  return !focus.includes(";") && node.split(";").pop() === focus;
+}
+
+/**
+ * Scope the design to just the subtree(s) rooted at `focusNodeId`, dropping
+ * every sibling branch. For a huge instance where the caller only cares about
+ * one frame (and the rest blows the token budget), this is the only way to
+ * narrow the result — the API can't fetch an instance-internal node alone
+ * (see nodeMatchesFocus). Runs AFTER all full-tree enrichment so the kept
+ * subtree already carries resolved variants/libraries/dev-resources/SF
+ * symbols, and BEFORE icon download so only the focused subtree's icons are
+ * fetched.
+ *
+ * Best-effort: if nothing matches, the tree is left untouched and a warning is
+ * logged — returning an empty result would be strictly worse than returning
+ * the whole thing the caller was trying to narrow down.
+ *
+ * Also drops component/componentSet definitions no longer referenced by any
+ * surviving node — pure id-keyed lookup tables, safe to trim once their only
+ * referents are gone. `globalVars` styles are intentionally NOT pruned here:
+ * style refs are spread across many node fields and a missed one would dangle.
+ */
+export function focusDesignSubtree(design: SimplifiedDesign, focusNodeId: string): void {
+  const roots: SimplifiedNode[] = [];
+  const collect = (nodes: SimplifiedNode[]): void => {
+    for (const node of nodes) {
+      if (nodeMatchesFocus(node.id, focusNodeId)) {
+        // Don't descend into a match — a nested match would be a subtree of
+        // one already kept, so keeping both would duplicate it.
+        roots.push(node);
+      } else if (node.children) {
+        collect(node.children);
+      }
+    }
+  };
+  collect(design.nodes);
+
+  if (roots.length === 0) {
+    Logger.log(
+      `focusNodeId "${focusNodeId}" matched no node in the fetched tree — returning the full tree unscoped.`,
+    );
+    return;
+  }
+  design.nodes = roots;
+
+  // Drop now-orphaned component/componentSet entries.
+  const referencedComponentIds = new Set<string>();
+  const collectComponentIds = (nodes: SimplifiedNode[]): void => {
+    for (const node of nodes) {
+      if (node.componentId) referencedComponentIds.add(node.componentId);
+      if (node.children) collectComponentIds(node.children);
+    }
+  };
+  collectComponentIds(design.nodes);
+
+  const referencedSetIds = new Set<string>();
+  const keptComponents: typeof design.components = {};
+  for (const [id, comp] of Object.entries(design.components)) {
+    if (referencedComponentIds.has(id)) {
+      keptComponents[id] = comp;
+      if (comp.componentSetId) referencedSetIds.add(comp.componentSetId);
+    }
+  }
+  design.components = keptComponents;
+
+  const keptSets: typeof design.componentSets = {};
+  for (const [id, set] of Object.entries(design.componentSets)) {
+    if (referencedSetIds.has(id)) keptSets[id] = set;
+  }
+  design.componentSets = keptSets;
+}
+
+/**
+ * Attach existing Swift implementations pinned via Figma's Dev Resources
+ * panel onto the exact nodes they target. Figma's widget only accepts a
+ * value that parses as a URL, so a designer pinning "this node IS already
+ * implemented here" pastes a bare repo-relative file path with an
+ * "https://" bolted on the front to pass validation (e.g.
+ * "https://native/Pods/.../ZSDialogWindow.swift") — the scheme is stripped
+ * here.
+ *
+ * The resource's `name` is free text — Figma has no concept of "kind" for
+ * it — so the design team's naming CONVENTION is what gives it structure:
+ * underscore-separated scope, outermost to innermost —
+ *   "ClassName"                                → the type itself
+ *   "ClassName_variableName"                   → a property inside it
+ *   "ClassName_functionName_variableName"      → a variable inside a method
+ *   "functionName_variableName"                → variable inside a free function (no class)
+ * Split into `scopePath` (only when the name actually has an underscore —
+ * a plain single name has no path to add). Consumers should resolve
+ * scopePath progressively: find the outermost element, then search inside
+ * it for the next, and so on; the last element is the exact declaration.
+ *
+ * A dev resource whose link is itself a Figma design URL (rather than a
+ * .swift path) is treated as a component-variant reference instead — see
+ * attachComponentVariantReferences below. Anything else (a ticket, a spec
+ * doc) is neither, so it's dropped.
+ *
+ * Always-on: one unfiltered /dev_resources call per fetch, matched locally
+ * against the fetched subtree (exact node-id match only; a link pinned
+ * inside a library's master component doesn't resolve onto instances —
+ * that data lives in the library file, not this one). Best-effort like
+ * every enrichment pass: a missing scope (403) or a file with no matching
+ * links simply leaves nodes unstamped.
+ */
+export async function attachDevResources(
+  design: SimplifiedDesign,
+  figmaService: FigmaService,
+  fileKey: string,
+): Promise<void> {
+  let resources: DevResourceLink[];
+  try {
+    resources = (await figmaService.getDevResources(fileKey)).dev_resources ?? [];
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    Logger.log(`Skipping dev-resource links for ${fileKey}: ${message}`);
+    return;
+  }
+  if (resources.length === 0) return;
+
+  const { implementationsByNodeId, variantLinkTargetsByNodeId } = parseDevResourceLinks(resources);
+  attachImplementedBy(design, implementationsByNodeId);
+
+  const distinctTargets = findPresentVariantTargets(design, variantLinkTargetsByNodeId);
+  if (distinctTargets.size === 0) return;
+
+  const references = (
+    await Promise.all(
+      [...distinctTargets.values()].map((target) =>
+        fetchComponentVariantReference(target, figmaService),
+      ),
+    )
+  ).filter((r): r is Record<string, unknown> => r !== undefined);
+
+  if (references.length > 0) design.componentVariantReferences = references;
+}
+
+/**
+ * Batch counterpart to attachDevResources — used when multiple Figma targets
+ * are fetched in a single get_figma_data call (see getFigmaDataBatch in
+ * get-figma-data.ts). Two things get deduplicated across the WHOLE batch
+ * rather than per target:
+ *
+ * 1. The /dev_resources call itself — fetched once per unique file key, not
+ *    once per target, even when several targets share a file.
+ * 2. Component-variant-reference fetches — if two different requested
+ *    screens both carry a Dev Resources link to the identical component
+ *    (e.g. a Cancel and an OK button on DIFFERENT screens, both Push Button
+ *    instances), that reference is fetched once and attached ONLY to the
+ *    first screen (in the order given) that needs it. Every later screen in
+ *    the same batch that references the identical target gets nothing added
+ *    for it — the caller already has the answer a few sections earlier in
+ *    the very same response, so repeating it is pure waste, not the
+ *    correctness gap it would be across separate, independent tool calls
+ *    (where the caller's context may have moved on by the time a later call
+ *    happens — see the design.guide comment on addConsumptionGuide).
+ *
+ * implementedBy is NOT deduplicated across entries — it's cheap (one
+ * file+symbol pair) and always specific to the exact node it's pinned to,
+ * unlike componentVariantReferences which can be an entire subtree.
+ */
+export async function attachDevResourcesBatch(
+  entries: { design: SimplifiedDesign; fileKey: string }[],
+  figmaService: FigmaService,
+): Promise<void> {
+  const resourcesByFileKey = new Map<string, DevResourceLink[]>();
+  await Promise.all(
+    [...new Set(entries.map((e) => e.fileKey))].map(async (fileKey) => {
+      try {
+        resourcesByFileKey.set(
+          fileKey,
+          (await figmaService.getDevResources(fileKey)).dev_resources ?? [],
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        Logger.log(`Skipping dev-resource links for ${fileKey}: ${message}`);
+        resourcesByFileKey.set(fileKey, []);
+      }
+    }),
+  );
+
+  const perEntryTargets = entries.map((entry) => {
+    const resources = resourcesByFileKey.get(entry.fileKey) ?? [];
+    const { implementationsByNodeId, variantLinkTargetsByNodeId } =
+      parseDevResourceLinks(resources);
+    attachImplementedBy(entry.design, implementationsByNodeId);
+    return findPresentVariantTargets(entry.design, variantLinkTargetsByNodeId);
+  });
+
+  const allDistinctTargets = new Map<string, VariantLinkTarget>();
+  for (const targets of perEntryTargets) {
+    for (const [key, target] of targets) allDistinctTargets.set(key, target);
+  }
+  if (allDistinctTargets.size === 0) return;
+
+  const fetched = new Map<string, Record<string, unknown> | undefined>();
+  await Promise.all(
+    [...allDistinctTargets.entries()].map(async ([key, target]) => {
+      fetched.set(key, await fetchComponentVariantReference(target, figmaService));
+    }),
+  );
+
+  const claimed = new Set<string>();
+  for (let i = 0; i < entries.length; i++) {
+    const toAttach: Record<string, unknown>[] = [];
+    for (const key of perEntryTargets[i].keys()) {
+      if (claimed.has(key)) continue;
+      const ref = fetched.get(key);
+      if (!ref) continue;
+      toAttach.push(ref);
+      claimed.add(key);
+    }
+    if (toAttach.length > 0) entries[i].design.componentVariantReferences = toAttach;
+  }
+}
+
+interface DevResourceLink {
+  name: string;
+  url: string;
+  node_id: string;
+}
+
+type ImplementedByEntry = { file: string; symbol: string; scopePath?: string[] };
+type VariantLinkTarget = { fileKey: string; nodeId: string };
+
+/**
+ * Pure parse: split a file's raw dev-resource links into Swift implementedBy
+ * assignments and Figma-design-URL variant-reference targets, both keyed by
+ * the node they're pinned to. No I/O, no tree mutation — shared by the
+ * single-target (attachDevResources) and batch (attachDevResourcesBatch)
+ * paths so the same parsing rules apply regardless of how many targets are
+ * being fetched together.
+ */
+function parseDevResourceLinks(resources: DevResourceLink[]): {
+  implementationsByNodeId: Map<string, ImplementedByEntry[]>;
+  variantLinkTargetsByNodeId: Map<string, VariantLinkTarget>;
+} {
+  const implementationsByNodeId = new Map<string, ImplementedByEntry[]>();
+  const variantLinkTargetsByNodeId = new Map<string, VariantLinkTarget>();
+
+  for (const resource of resources) {
+    if (resource.url.toLowerCase().endsWith(".swift")) {
+      const entries = implementationsByNodeId.get(resource.node_id) ?? [];
+      const parts = resource.name.split("_").filter(Boolean);
+      entries.push({
+        file: resource.url.replace(/^https?:\/\//i, ""),
+        symbol: resource.name,
+        ...(parts.length > 1 ? { scopePath: parts } : {}),
+      });
+      implementationsByNodeId.set(resource.node_id, entries);
+      continue;
+    }
+
+    const target = tryParseFigmaUrl(resource.url);
+    if (target?.nodeId) {
+      variantLinkTargetsByNodeId.set(resource.node_id, {
+        fileKey: target.fileKey,
+        nodeId: target.nodeId,
+      });
+    }
+  }
+
+  return { implementationsByNodeId, variantLinkTargetsByNodeId };
+}
+
+function attachImplementedBy(
+  design: SimplifiedDesign,
+  implementationsByNodeId: Map<string, ImplementedByEntry[]>,
+): void {
+  if (implementationsByNodeId.size === 0) return;
+  const visit = (nodes: SimplifiedNode[]): void => {
+    for (const node of nodes) {
+      const implementations = implementationsByNodeId.get(node.id);
+      if (implementations) node.implementedBy = implementations;
+      if (node.children) visit(node.children);
+    }
+  };
+  visit(design.nodes);
+}
+
+/**
+ * Distinct variant-reference targets actually present in this one tree,
+ * keyed by "fileKey:nodeId" — a node whose dev-resource link exists but
+ * isn't in the fetched subtree contributes nothing (matches the existing
+ * implementedBy matching rule: exact node-id presence only).
+ */
+function findPresentVariantTargets(
+  design: SimplifiedDesign,
+  targetsByNodeId: Map<string, VariantLinkTarget>,
+): Map<string, VariantLinkTarget> {
+  if (targetsByNodeId.size === 0) return new Map();
+
+  const present = new Set<string>();
+  const visit = (nodes: SimplifiedNode[]): void => {
+    for (const node of nodes) {
+      if (targetsByNodeId.has(node.id)) present.add(node.id);
+      if (node.children) visit(node.children);
+    }
+  };
+  visit(design.nodes);
+
+  const distinct = new Map<string, VariantLinkTarget>();
+  for (const nodeId of present) {
+    const target = targetsByNodeId.get(nodeId)!;
+    distinct.set(`${target.fileKey}:${target.nodeId}`, target);
+  }
+  return distinct;
+}
+
+/**
+ * Fetches and builds ONE component-variant-reference entry — the expensive,
+ * shareable part of resolving a Dev Resources variant link. Extracted so a
+ * batch fetch (attachDevResourcesBatch) can call it exactly once per
+ * distinct target even when several requested screens reference the same
+ * component, instead of once per screen.
+ *
+ * WHY this data is worth fetching at all: a screen's fetch only ever shows
+ * the one variant actually placed there — a button's other State x Enabled
+ * combinations are invisible to a fetch of just that screen. A designer
+ * pins ONE Dev Resources link (the URL of a canvas where every variant is
+ * placed as a real instance) on any node using that component; this
+ * resolves it in the SAME response, no second get_figma_data round-trip
+ * required from the caller.
+ *
+ * The returned entry carries the target's componentSets (with full
+ * propertyDefinitions.variantOptions, resolved via enrichComponentSetDefinitions)
+ * alongside the instances actually found on the reference canvas — the two
+ * can disagree (a set may define 6 valid combinations while the reference
+ * canvas currently only demonstrates 4), and that gap is exactly what a
+ * consumer needs to notice and flag rather than silently assuming the
+ * canvas is exhaustive.
+ *
+ * Best-effort like every enrichment pass: returns undefined on failure,
+ * logged but never thrown — one broken reference must never break the rest
+ * of the response.
+ */
+async function fetchComponentVariantReference(
+  target: VariantLinkTarget,
+  figmaService: FigmaService,
+): Promise<Record<string, unknown> | undefined> {
+  try {
+    const raw = await figmaService.getRawNode(target.fileKey, target.nodeId, 2);
+    const simplified = await simplifyRawFigmaObject(raw.data, allExtractors, { maxDepth: 2 });
+    await enrichComponentSetDefinitions(simplified, figmaService, target.fileKey);
+    annotateSfSymbols(simplified);
+
+    const styles = simplified.globalVars.styles;
+    const tokens = simplified.globalVars.tokens ?? {};
+    const nodes = simplified.nodes.map((node) => {
+      const inlined = inlineNode(node, styles, tokens);
+      stripReferenceRelationalFields(inlined);
+      return inlined;
+    });
+
+    return {
+      fileKey: target.fileKey,
+      nodeId: target.nodeId,
+      ...(Object.keys(simplified.componentSets).length > 0 && {
+        componentSets: simplified.componentSets,
+      }),
+      nodes,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    Logger.log(
+      `Skipping component variant reference ${target.fileKey}/${target.nodeId}: ${message}`,
+    );
+    return undefined;
+  }
+}
+
+/**
+ * Strip fields that only describe THIS reference canvas's own documentation
+ * layout — sibling order, parent linkage, and the gap/padding/position that
+ * exist purely to arrange swatches for a human reader — never real app
+ * layout. Everything else (componentProperties, fills, effects, text, ...)
+ * is exactly the "core detail of the variant" this attachment exists for,
+ * and stays untouched.
+ */
+function stripReferenceRelationalFields(node: NativeNode): void {
+  delete node.siblingIndex;
+  delete node.parentId;
+  delete node.parentName;
+  if (node.layout && typeof node.layout === "object" && !Array.isArray(node.layout)) {
+    const layout = node.layout as {
+      gap?: unknown;
+      padding?: unknown;
+      locationRelativeToParent?: unknown;
+    };
+    delete layout.gap;
+    delete layout.padding;
+    delete layout.locationRelativeToParent;
+  }
+  if (node.children) {
+    for (const child of node.children) stripReferenceRelationalFields(child);
+  }
+}
+
 /** SF Symbols occupy Unicode planes 15-16 (private use). */
 const PUA_START = 0xf0000;
+
+/**
+ * Replace every private-use-area glyph in a string with a readable
+ * "{sf:name}" placeholder, returning both the rewritten string and the
+ * ordered list of names found. Unknown codepoints (symbols newer than the
+ * vendored table) surface as "{sf:U+XXXXX}" so they stay greppable rather
+ * than silently invisible.
+ */
+function rewritePuaGlyphs(value: string): { rewritten: string; names: string[] } {
+  const names: string[] = [];
+  let rewritten = "";
+  for (const ch of value) {
+    const cp = ch.codePointAt(0)!;
+    if (cp >= PUA_START) {
+      const name = SF_SYMBOL_NAMES[cp] ?? `U+${cp.toString(16).toUpperCase()}`;
+      names.push(name);
+      rewritten += `{sf:${name}}`;
+    } else {
+      rewritten += ch;
+    }
+  }
+  return { rewritten, names };
+}
 
 /**
  * Annotate every text node whose content contains private-use-area glyphs
@@ -191,35 +688,77 @@ const PUA_START = 0xf0000;
  * replace the glyph in the text itself with a readable "{sf:name}"
  * placeholder. The raw PUA character is invisible/mojibake to every consumer
  * (and unrenderable by AppKit string APIs anyway) — leaving it in `text`
- * invites treating it as literal content. Unknown codepoints (symbols newer
- * than the vendored table) surface as "{sf:U+XXXXX}" so they stay greppable
- * rather than silently invisible.
+ * invites treating it as literal content.
+ *
+ * Also rewrites `name` the same way, without adding to `sfSymbols` (that
+ * field is documented as text-content glyphs specifically) — a layer can
+ * literally be named after an SF Symbol glyph (a designer pasted the icon
+ * character as the layer name, not just as text), which otherwise surfaces
+ * as an unrenderable character that looks blank in most fonts/editors.
  */
 export function annotateSfSymbols(design: SimplifiedDesign): void {
   const visit = (nodes: SimplifiedNode[]): void => {
     for (const node of nodes) {
       if (node.text) {
-        const names: string[] = [];
-        let rewritten = "";
-        for (const ch of node.text) {
-          const cp = ch.codePointAt(0)!;
-          if (cp >= PUA_START) {
-            const name = SF_SYMBOL_NAMES[cp] ?? `U+${cp.toString(16).toUpperCase()}`;
-            names.push(name);
-            rewritten += `{sf:${name}}`;
-          } else {
-            rewritten += ch;
-          }
-        }
+        const { rewritten, names } = rewritePuaGlyphs(node.text);
         if (names.length > 0) {
           node.sfSymbols = names;
           node.text = rewritten;
         }
       }
+      const { rewritten: rewrittenName, names: nameGlyphs } = rewritePuaGlyphs(node.name);
+      if (nameGlyphs.length > 0) {
+        node.name = rewrittenName;
+      }
       if (node.children) visit(node.children);
     }
   };
   visit(design.nodes);
+}
+
+/**
+ * Walk up from a starting directory until a `package.json` is found. Used to
+ * locate the MCP package root regardless of whether this module is running
+ * as TypeScript source (src/services/) or bundled (dist/) — the bundler's
+ * chunk-splitting depth isn't stable, so a fixed number of `..` segments
+ * would break in one context or the other. package.json is always exactly
+ * one level above `dist/`, however deep the running file's own path is.
+ */
+function findPackageRoot(startDir: string): string {
+  let dir = startDir;
+  while (!existsSync(join(dir, "package.json"))) {
+    const parent = dirname(dir);
+    if (parent === dir) {
+      throw new Error(`Could not locate the MCP package root from ${startDir}`);
+    }
+    dir = parent;
+  }
+  return dir;
+}
+
+const PACKAGE_ROOT = findPackageRoot(dirname(fileURLToPath(import.meta.url)));
+
+/**
+ * Split a directive markdown file into one string per `## ` heading, each
+ * rendered as "Heading: body text" with the body's internal whitespace
+ * collapsed to single spaces — the body can be wrapped across multiple lines
+ * in the source file for readability without affecting the flattened output.
+ */
+function parseMarkdownRules(markdown: string): string[] {
+  const sections = markdown.split(/^## /m).slice(1);
+  return sections.map((section) => {
+    const newlineIndex = section.indexOf("\n");
+    const heading = section.slice(0, newlineIndex).trim();
+    const body = section
+      .slice(newlineIndex + 1)
+      .trim()
+      .replace(/\s+/g, " ");
+    return `${heading}: ${body}`;
+  });
+}
+
+function loadPromptMarkdown(filename: string): string {
+  return readFileSync(join(PACKAGE_ROOT, "prompts", filename), "utf8");
 }
 
 /**
@@ -228,39 +767,35 @@ export function annotateSfSymbols(design: SimplifiedDesign): void {
  * client) and the server's MCP `instructions` (sent once at session init,
  * see mcp/index.ts — support varies by client, so the embedded copy is the
  * reliable fallback, not a replacement).
+ *
+ * Source of truth is prompts/consumption-guide.md, not this array — edit
+ * prose there, in plain readable Markdown, rather than as TypeScript string
+ * literals.
  */
-export const CONSUMPTION_GUIDE: readonly string[] = [
-  "layout: mode/gap/padding/sizing map to NSStackView (orientation, spacing, edgeInsets); sizing hug = size-to-content, fill = stretch. Add width/height constraints ONLY when sizing is 'fixed' (value in layout dimensions). absoluteBoundingBox is the rendered size for reference/verification — never hardcode it as constraints alongside stack layout.",
-  "instance nodes with native: true come from Apple's macOS UI kit Figma library (library names the source file) — implement the stock AppKit control the component name describes (component 'Pop-Up Button' → NSPopUpButton). Their children are Figma's visual decomposition of that control (drawn cursors, selection frames, placeholder layers, chevron glyphs) — mine them for strings/icons/state, do NOT rebuild them as views. Instances without native: true are this app's own custom components — map them to the app's custom Swift classes, not stock AppKit.",
-  "{sf:name} inside text is an SF Symbol — set it via NSImage(systemSymbolName:) on the control (names also listed under the node's sfSymbols); it is not literal string content.",
-  "boxShadow may list multiple comma-separated shadow layers; NSView supports a single NSShadow — match the dominant (largest-blur) layer unless a pixel-exact focus ring justifies custom layer drawing.",
-];
+export const CONSUMPTION_GUIDE: readonly string[] = parseMarkdownRules(
+  loadPromptMarkdown("consumption-guide.md"),
+);
 
 /** Describes where a design-token fill/stroke resolves to — differs by output format (see native-json.ts). */
 const TOKEN_INDIRECTION_NATIVE =
-  "fills/strokes with snake_case names are design tokens, inlined in place as { token, values, themed, appkit } — no lookup elsewhere in the document. themed: true means the design defines different Light and Dark values — but per the LIGHT THEME ONLY rule below, implement the Light value (values.Light); values.Dark is reference data, not something to build. approx: true means the token name was inferred by color match (the bound variable's ID wasn't in the local token exports) — treat it as a best guess and verify against the design, because the API's color snapshot for a variable-bound fill can lag the variable's live value.";
+  "fills/strokes with snake_case names are design tokens, inlined in place as { token, values, themed, appkit? } — no lookup elsewhere in the document. themed: true means the design defines different Light and Dark values — but per the LIGHT THEME ONLY rule below, implement the Light value (values.Light); values.Dark is reference data, not something to build. appkit, when present, means this token is a material/vibrancy effect (NSVisualEffectView.Material.*), not a flat color — build it as such; absent means it's a plain color, use the Light value directly (a suggested NSColor name is deliberately not included there, since Light Theme Only already overrides it). approx: true means the token name was inferred by color match (the bound variable's ID wasn't in the local token exports) — treat it as a best guess and verify against the design, because the API's color snapshot for a variable-bound fill can lag the variable's live value.";
 const TOKEN_INDIRECTION_REF =
-  "fills/strokes with snake_case names are design tokens — per-mode values under globalVars.tokens[name]. themed: true means the design defines different Light and Dark values — but per the LIGHT THEME ONLY rule below, implement the Light value (values.Light); values.Dark is reference data, not something to build. approx: true means the token name was inferred by color match (the bound variable's ID wasn't in the local token exports) — treat it as a best guess and verify against the design, because the API's color snapshot for a variable-bound fill can lag the variable's live value.";
+  "fills/strokes with snake_case names are design tokens — per-mode values under globalVars.tokens[name]. themed: true means the design defines different Light and Dark values — but per the LIGHT THEME ONLY rule below, implement the Light value (values.Light); values.Dark is reference data, not something to build. appkit, when present, means this token is a material/vibrancy effect (NSVisualEffectView.Material.*), not a flat color — build it as such; absent means it's a plain color, use the Light value directly. approx: true means the token name was inferred by color match (the bound variable's ID wasn't in the local token exports) — treat it as a best guess and verify against the design, because the API's color snapshot for a variable-bound fill can lag the variable's live value.";
 
 /**
  * Project directive: how to behave when using this MCP, not how to parse its
- * output (that's CONSUMPTION_GUIDE). Baked directly into this fork rather
- * than loaded from an external project file — this server is a customized
- * bridge for one specific app, handed out as a self-contained unit, so the
- * directive must travel with the MCP itself with zero setup by whoever
- * receives it. Deliberately self-contained (no "see other doc" pointers):
- * anyone who has this server has everything in this array, nothing else.
+ * output (that's CONSUMPTION_GUIDE). Source of truth is
+ * prompts/project-directive.md, not this array — this server is a
+ * customized bridge for one specific app, handed out as a self-contained
+ * unit, so the directive must travel with the MCP itself with zero setup by
+ * whoever receives it (the prompts/ directory ships alongside dist/, not
+ * loaded from anywhere outside the package). Deliberately self-contained (no
+ * "see other doc" pointers): anyone who has this server has everything in
+ * this array, nothing else.
  */
-export const PROJECT_DIRECTIVE: readonly string[] = [
-  "IDENTITY: this is a custom Figma MCP built for a native macOS app written in Swift/AppKit. For any task that implements, updates, or compares against a Figma design, use this MCP's own tools (get_figma_data, download_figma_images, write_imageset, write_colorset) as the source of truth — never guess a color, spacing value, or icon name, and never browse Figma directly instead of calling a tool.",
-  "ARCHITECTURE: UI framework is AppKit only — never SwiftUI. Preferred pattern is VIPER (View/Interactor/Presenter/Entity/Router) for document/module-level work; a simpler MVP (Model/View/Presenter) is acceptable for small, self-contained features. Match whatever pattern the surrounding code in that area already uses rather than forcing one pattern everywhere; if neither fits, pick the closest reasonable pattern and state which one you chose and why.",
-  "ASSET & VALUE FIDELITY WORKFLOW — required before writing UI code from a Figma fetch: (1) fetch the target node(s) with get_figma_data, passing downloadIcons: true — every icon (IMAGE-SVG node) in the tree is then auto-downloaded as a vector PDF and each icon node's output carries iconFile with the saved filename, so there is no separate per-icon download step to orchestrate; use download_figma_images only for non-icon raster IMAGE fills (photos/logos) that downloadIcons does not cover — never reference any Figma asset without it being pulled down and inspected; (2) compare the downloaded assets and every resolved color/value against what the app currently has (existing image assets, colors, layout constants already in the codebase); (3) match Figma's values exactly — do not round, approximate, or silently substitute an existing 'close enough' value; (4) exception: deviate from the literal Figma value only when applying it as-is would create a genuine inconsistency in the running app (e.g. the exact asset can't be produced cleanly, the color is shared across many call sites and a global change would be wrong, or the design node is ambiguous between multiple existing implementations); (5) always disclose deviations — if you change or override a fetched value for any reason, tell the user explicitly which value you changed, from what to what, and the specific cause. Never change a value silently.",
-  "LARGE FETCHES — split into sub-modules, verify one at a time: if a fetched node tree is too large to hold and implement correctly in one pass (many nodes, deep nesting, a large native-yaml/native-json output), do not implement it in one shot. Re-fetch it broken up instead — call get_figma_data again with the nodeId of one child section/screen/component at a time rather than consuming the whole parent tree at once. Implement and verify each sub-module fully (it compiles, matches the fetched values, no regressions) before moving to the next; only wire sub-modules together after every one of them is individually confirmed correct.",
-  "ICON vs IMAGE — export the icon, not the image: an asset frequently has both an Icon representation (cropped tight to the visible glyph — the one actually placed in the app UI, small, usually a VECTOR/IMAGE-SVG node) and an Image representation (the larger/uncropped source artwork it was cut from). When a container has both, resolve the nodeId from the Icon child/section specifically and pass THAT to write_imageset — never the Image one, even though the Image node is often easier to spot (larger, sits earlier in the layer list). Before calling write_imageset, sanity-check that the chosen node's absoluteBoundingBox roughly matches the icon's actual on-screen size in the design — a full/uncropped Image node will be visibly larger or a different aspect ratio than the icon slot it's meant to fill; if it doesn't match, you picked the wrong node.",
-  "LIGHT THEME ONLY — implement against Light mode values; the UI must not change when the system switches to dark: always use a token's Light value (values.Light), never values.Dark; add no dark-mode branches, no NSAppearance/effectiveAppearance observers, and no dark variants in asset-catalog colorsets you create. Be careful with adaptive AppKit semantic colors (NSColor.labelColor and friends): they flip automatically with the system appearance, so unless the app or the containing window/view is explicitly pinned to light (NSAppearance .aqua), prefer the fixed Light value from the fetch over the adaptive color — even when the token metadata suggests an appkit name. If a task ever genuinely requires dark-mode support, that is a user decision — ask first, don't add it on your own.",
-  "TYPOGRAPHY & VALUE DRIFT — never alter fetched values, never revert them later: font size, font weight, line height, letter spacing, colors and alpha come only from the fetched textStyle/fills — never round, 'normalize', or swap them for a value that merely feels more standard (fontSize 13 stays 13; weight 510 stays 510, not 500 or 'medium'). This applies equally to later edits: when modifying code previously implemented from a fetch, do not touch font/color/spacing values outside the requested change — a later edit that silently reverts a previously-correct fetched value is a regression, not a cleanup. Before finishing any UI change, re-read the fetched values for every text node you touched and confirm each fontSize/fontWeight/color you wrote matches exactly; if you believe a fetched value is a design mistake, say so to the user and ask — never adjust it silently.",
-  "ICONS — FIGMA IS THE ONLY SOURCE, NEVER SUBSTITUTE: every icon in the implemented UI must come from this exact Figma fetch — either the auto-downloaded vector PDF (iconFile, from downloadIcons: true) written into the app's asset catalog via write_imageset, or the exact SF Symbol name the design itself encodes ({sf:name} in text — that IS Figma's own choice of icon, not an external substitution, so using it is required, not prohibited). Never pick a 'close enough' system icon, a different SF Symbol that merely looks similar, or any icon from outside this fetch — not from memory, not from a generic icon set, not by guessing a plausible SF Symbol name that wasn't actually in the data. If the exact icon can't be resolved (download failed, node ambiguous, no {sf:name} present), stop and tell the user exactly which icon is missing and why — never silently render a placeholder or substitute as if it were the real asset.",
-];
+export const PROJECT_DIRECTIVE: readonly string[] = parseMarkdownRules(
+  loadPromptMarkdown("project-directive.md"),
+);
 
 /**
  * Embed consumption rules into the output itself. These correct the known

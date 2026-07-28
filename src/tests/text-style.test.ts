@@ -53,13 +53,29 @@ describe("extractTextStyle omit-when-default", () => {
     expect(style.letterSpacing).toBe("10%");
   });
 
-  it("carries Position: Superscript through opentypeFlags (SUPS)", () => {
+  it("surfaces Position: Superscript as position, not a raw SUPS flag", () => {
     const style = extractTextStyle(makeText({ ...base, opentypeFlags: { SUPS: 1, KERN: 0 } }))!;
-    expect(style.opentypeFlags).toEqual({ SUPS: 1 });
+    expect(style.position).toBe("superscript");
+    expect(style.opentypeFlags).toBeUndefined();
+  });
+
+  it("surfaces Position: Subscript as position", () => {
+    const style = extractTextStyle(makeText({ ...base, opentypeFlags: { SUBS: 1 } }))!;
+    expect(style.position).toBe("subscript");
+    expect(style.opentypeFlags).toBeUndefined();
+  });
+
+  it("keeps other non-zero flags in opentypeFlags alongside position", () => {
+    const style = extractTextStyle(
+      makeText({ ...base, opentypeFlags: { SUPS: 1, SS01: 1, KERN: 0 } }),
+    )!;
+    expect(style.position).toBe("superscript");
+    expect(style.opentypeFlags).toEqual({ SS01: 1 });
   });
 
   it("omits opentypeFlags entirely when all flags are zero", () => {
     const style = extractTextStyle(makeText({ ...base, opentypeFlags: { KERN: 0 } }))!;
     expect(style.opentypeFlags).toBeUndefined();
+    expect(style.position).toBeUndefined();
   });
 });

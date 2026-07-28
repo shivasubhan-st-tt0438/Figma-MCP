@@ -103,6 +103,26 @@ function registerStyle(
  */
 export const layoutExtractor: ExtractorFn = (node, result, context) => {
   const layout = buildSimplifiedLayout(node, context.parent);
+
+  // layout.dimensions and the node's own absoluteBoundingBox (already set by
+  // nodeMetaExtractor, which runs first) both come from the same raw
+  // width/height whenever an axis is FIXED — duplicating the same numbers in
+  // two places gives a consumer nothing absoluteBoundingBox didn't already
+  // say. Drop only the axes that actually match; a genuinely different value
+  // (rare, but not impossible) stays, since that would be a real signal, not
+  // noise.
+  if (layout.dimensions && result.absoluteBoundingBox) {
+    if (layout.dimensions.width === result.absoluteBoundingBox.width) {
+      delete layout.dimensions.width;
+    }
+    if (layout.dimensions.height === result.absoluteBoundingBox.height) {
+      delete layout.dimensions.height;
+    }
+    if (Object.keys(layout.dimensions).length === 0) {
+      delete layout.dimensions;
+    }
+  }
+
   if (Object.keys(layout).length > 1) {
     result.layout = findOrCreateVar(context.globalVars, layout, "layout");
   }
@@ -167,38 +187,46 @@ export const visualsExtractor: ExtractorFn = (node, result, context) => {
   // fills
   if (hasValue("fills", node) && Array.isArray(node.fills) && node.fills.length) {
     const visiblePaints = node.fills.filter(isVisible);
-    const fills = visiblePaints.map((fill) => parsePaint(fill, hasChildren)).reverse();
-    result.fills = registerStyle(node, context, fills, ["fill", "fills"], "fill");
+    // A node can have a raw `fills` array with entries that are ALL
+    // invisible (visible: false on every paint) — the outer guard above only
+    // checks the raw array's length, so without this check an empty
+    // `fills: []` gets registered/emitted for a node that effectively has no
+    // fill at all, conveying nothing a consumer can act on.
+    if (visiblePaints.length > 0) {
+      const fills = visiblePaints.map((fill) => parsePaint(fill, hasChildren)).reverse();
+      result.fills = registerStyle(node, context, fills, ["fill", "fills"], "fill");
 
-    // Capture per-paint Figma Variable bindings, keyed by index into the
-    // final (filtered + reversed) fills array. Paint-level boundVariables is
-    // the authoritative source; the node-level boundVariables.fills array is
-    // the older encoding and used as a fallback for its first entry. These
-    // IDs are resolved to friendly token names in a later pass
-    // (resolveVariableFillNames); anything unresolvable stays on the node as
-    // a diagnostic.
-    const bindings: Record<number, string> = {};
-    const nodeLevelBinding =
-      "boundVariables" in node &&
-      node.boundVariables &&
-      typeof node.boundVariables === "object" &&
-      "fills" in node.boundVariables
-        ? ((node.boundVariables as { fills?: unknown }).fills as
-            | { type?: string; id?: string }[]
-            | undefined)
-        : undefined;
+      // Capture per-paint Figma Variable bindings, keyed by index into the
+      // final (filtered + reversed) fills array. Paint-level boundVariables is
+      // the authoritative source; the node-level boundVariables.fills array is
+      // the older encoding and used as a fallback for its first entry. These
+      // IDs are resolved to friendly token names in a later pass
+      // (resolveVariableFillNames); anything unresolvable stays on the node as
+      // a diagnostic.
+      const bindings: Record<number, string> = {};
+      const nodeLevelBinding =
+        "boundVariables" in node &&
+        node.boundVariables &&
+        typeof node.boundVariables === "object" &&
+        "fills" in node.boundVariables
+          ? ((node.boundVariables as { fills?: unknown }).fills as
+              | { type?: string; id?: string }[]
+              | undefined)
+          : undefined;
 
-    visiblePaints.forEach((paint, rawIndex) => {
-      const paintAlias = (paint as { boundVariables?: { color?: { type?: string; id?: string } } })
-        .boundVariables?.color;
-      const fallbackAlias = rawIndex === 0 ? nodeLevelBinding?.[0] : undefined;
-      const alias = paintAlias ?? fallbackAlias;
-      if (alias?.type === "VARIABLE_ALIAS" && alias.id) {
-        bindings[visiblePaints.length - 1 - rawIndex] = alias.id;
+      visiblePaints.forEach((paint, rawIndex) => {
+        const paintAlias = (
+          paint as { boundVariables?: { color?: { type?: string; id?: string } } }
+        ).boundVariables?.color;
+        const fallbackAlias = rawIndex === 0 ? nodeLevelBinding?.[0] : undefined;
+        const alias = paintAlias ?? fallbackAlias;
+        if (alias?.type === "VARIABLE_ALIAS" && alias.id) {
+          bindings[visiblePaints.length - 1 - rawIndex] = alias.id;
+        }
+      });
+      if (Object.keys(bindings).length > 0) {
+        result.fillVariableIds = bindings;
       }
-    });
-    if (Object.keys(bindings).length > 0) {
-      result.fillVariableIds = bindings;
     }
   }
 

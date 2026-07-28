@@ -8,22 +8,50 @@ import {
   type ClientInfo,
   type Transport,
 } from "~/telemetry/index.js";
-import { getFigmaData as runGetFigmaData } from "~/services/get-figma-data.js";
+import {
+  getFigmaData as runGetFigmaData,
+  getFigmaDataBatch as runGetFigmaDataBatch,
+} from "~/services/get-figma-data.js";
 import type { OutputFormat } from "~/utils/serialize.js";
 
-const parameters = {
-  fileKey: z
-    .string()
-    .regex(/^[a-zA-Z0-9]+$/, "File key must be alphanumeric")
+const nodeIdSchema = z
+  .string()
+  .regex(
+    /^I?\d+[:|-]\d+(?:;\d+[:|-]\d+)*$/,
+    "Node ID must be like '1234:5678' or 'I5666:180910;1:10515;1:10336'",
+  );
+
+const fileKeySchema = z.string().regex(/^[a-zA-Z0-9]+$/, "File key must be alphanumeric");
+
+const targetSchema = z.object({
+  fileKey: fileKeySchema.describe(
+    "The key of the Figma file to fetch, often found in a provided URL like figma.com/(file|design)/<fileKey>/...",
+  ),
+  nodeId: nodeIdSchema
+    .optional()
     .describe(
-      "The key of the Figma file to fetch, often found in a provided URL like figma.com/(file|design)/<fileKey>/...",
+      "The ID of the node to fetch. Use format '1234:5678', or 'I5666:180910;1:10515;1:10336' for a deeply nested instance node.",
     ),
-  nodeId: z
-    .string()
-    .regex(
-      /^I?\d+[:|-]\d+(?:;\d+[:|-]\d+)*$/,
-      "Node ID must be like '1234:5678' or 'I5666:180910;1:10515;1:10336'",
-    )
+  depth: z
+    .number()
+    .optional()
+    .describe("OPTIONAL. Do NOT use unless explicitly requested by the user."),
+  downloadIcons: z
+    .boolean()
+    .optional()
+    .describe("Same as the top-level downloadIcons, scoped to this target."),
+  focusNodeId: nodeIdSchema
+    .optional()
+    .describe("Same as the top-level focusNodeId, scoped to this target."),
+});
+
+const parameters = {
+  fileKey: fileKeySchema
+    .optional()
+    .describe(
+      "The key of the Figma file to fetch, often found in a provided URL like figma.com/(file|design)/<fileKey>/... Omit when passing `targets` instead.",
+    ),
+  nodeId: nodeIdSchema
     .optional()
     .describe(
       "The ID of the node to fetch, often found as URL parameter node-id=<nodeId>, always use if provided. Use format '1234:5678' for a standard node, or 'I5666:180910;1:10515;1:10336' for a deeply nested instance node (the semicolon-joined path represents the instance override chain — it's still a single node ID, not multiple nodes).",
@@ -40,8 +68,25 @@ const parameters = {
     .describe(
       "Auto-download every icon (IMAGE-SVG node) in the fetched tree as a vector PDF into the server's image directory, and stamp iconFile (the saved filename) on each icon node in the response — no separate download_figma_images call needed per icon. Recommended whenever this fetch is for implementing or comparing UI, not for a quick structural read.",
     ),
+  focusNodeId: nodeIdSchema
+    .optional()
+    .describe(
+      "OPTIONAL. Scope the result to ONLY the subtree rooted at this node id, dropping every sibling branch — use when the fetched node is a large frame/instance but you only need one child frame out of it (and the full tree is too big / blows the token budget). The Figma API can't fetch an instance-internal node on its own, so this prunes the built tree instead. Accepts the full instance-internal id ('I3096:91050;1907:3787', as it appears in a prior fetch's output) OR the bare local id ('1907:3787'); both resolve to the same node. If it matches nothing, the full tree is returned unchanged.",
+    ),
+  targets: z
+    .array(targetSchema)
+    .min(2)
+    .optional()
+    .describe(
+      "Fetch MULTIPLE Figma links/nodes in ONE call instead of calling this tool once per link — use this whenever 2 or more Figma links/nodes need fetching together (e.g. several screens given in the same request). Each target still gets its own independent, complete result; the directive/guide text and any component-variant-reference data shared across targets are attached once (to the first target that needs them) instead of being repeated per target. Do not also pass the top-level fileKey/nodeId when using targets — use one or the other.",
+    ),
 };
 
+// A plain z.object (not .refine()'d) — the MCP SDK derives the tool's
+// published JSON Schema from this shape, and a ZodEffects wrapper (what
+// .refine returns) doesn't round-trip through that conversion the same way.
+// The fileKey/targets "exactly one of" rule is enforced in the handler
+// instead, after parsing, where a validation failure is just a normal error.
 const parametersSchema = z.object(parameters);
 export type GetFigmaDataParams = z.infer<typeof parametersSchema>;
 
@@ -57,7 +102,56 @@ async function getFigmaData(
   imageDir?: string,
 ) {
   try {
-    const { fileKey, nodeId: rawNodeId, depth, downloadIcons } = parametersSchema.parse(params);
+    const parsed = parametersSchema.parse(params);
+    const { nodeId: rawNodeId, depth, downloadIcons, focusNodeId, targets } = parsed;
+
+    if (targets && targets.length > 0) {
+      if (parsed.fileKey) {
+        throw new Error("Provide either fileKey or targets, not both.");
+      }
+      Logger.log(`Fetching ${targets.length} Figma targets in one batched call`);
+
+      const batchResult = await runGetFigmaDataBatch(
+        figmaService,
+        targets.map((t) => ({
+          fileKey: t.fileKey,
+          nodeId: t.nodeId?.replace(/-/g, ":"),
+          depth: t.depth,
+          downloadIcons: t.downloadIcons,
+          focusNodeId: t.focusNodeId,
+        })),
+        outputFormat,
+        {
+          colorTokensDir,
+          imageDir,
+          onFetchStart: async () => {
+            await sendProgress(extra, 0, 2, `Fetching ${targets.length} Figma targets`);
+          },
+          onSerializeStart: async () => {
+            await sendProgress(extra, 1, 2, "Serializing batch results");
+          },
+        },
+      );
+
+      Logger.log(
+        `Batch complete: ${batchResult.entries.filter((e) => !e.error).length}/${targets.length} targets succeeded`,
+      );
+
+      return {
+        content: batchResult.entries.map((entry) => {
+          const header = `# Target: ${entry.fileKey}${entry.nodeId ? `/${entry.nodeId}` : ""}`;
+          const text = entry.error
+            ? `${header}\nError fetching this target: ${entry.error}`
+            : `${header}\n${entry.formatted}`;
+          return { type: "text" as const, text };
+        }),
+      };
+    }
+
+    if (!parsed.fileKey) {
+      throw new Error("Provide either fileKey or targets.");
+    }
+    const fileKey = parsed.fileKey;
 
     // Replace - with : in nodeId for our query — Figma API expects :.
     // MCP-specific input quirk, so it lives here rather than in the shared core.
@@ -74,7 +168,7 @@ async function getFigmaData(
 
     const result = await runGetFigmaData(
       figmaService,
-      { fileKey, nodeId, depth, downloadIcons },
+      { fileKey, nodeId, depth, downloadIcons, focusNodeId },
       outputFormat,
       {
         colorTokensDir,
@@ -124,7 +218,10 @@ async function getFigmaData(
 export const getFigmaDataTool = {
   name: "get_figma_data",
   description:
-    "Get comprehensive Figma file data including layout, content, visuals, and component information",
+    "Get comprehensive Figma file data including layout, content, visuals, and component information. " +
+    "If 2 or more Figma links/nodes need fetching together (e.g. several screens given in the same " +
+    "request), pass them all via the `targets` array in ONE call instead of calling this tool once per " +
+    "link — see the `targets` parameter for why.",
   parametersSchema,
   handler: getFigmaData,
 } as const;

@@ -92,6 +92,22 @@ function tokenColorString(token: ColorToken): string {
 }
 
 /**
+ * Whether an AppKit hint is worth keeping in the output. Plain `NSColor.*`
+ * hints are dropped: the LIGHT THEME ONLY directive already tells a consumer
+ * to prefer the token's fixed Light value over any adaptive semantic color,
+ * so the hint's own suggestion is overridden in the common case anyway — and
+ * some are actively misleading (e.g. "NSColor.tertiaryLabelColor (dark
+ * appearance)" shown on a token meant to be implemented in light mode).
+ * `NSVisualEffectView.Material.*` hints are kept: they're the only signal
+ * that a token isn't a flat color at all but a blur/vibrancy material, which
+ * the raw rgba value alone can't convey, and nothing else in the LIGHT THEME
+ * ONLY rule makes that redundant.
+ */
+function isUsefulAppkitHint(hint: string): boolean {
+  return !hint.startsWith("NSColor.");
+}
+
+/**
  * Record token metadata (per-mode values, themed flag, AppKit hint) under
  * globalVars.tokens so consumers can answer "semantic or static?" without
  * re-deriving it. themed=true means the token's value differs across
@@ -126,7 +142,7 @@ function recordTokenInfo(
     themed: distinct.size > 1,
   };
   const appkit = appkitHints[token.path];
-  if (appkit) info.appkit = appkit;
+  if (appkit && isUsefulAppkitHint(appkit)) info.appkit = appkit;
   if (approx) info.approx = true;
 
   design.globalVars.tokens[token.path] = info;
@@ -291,7 +307,7 @@ function recordLiveTokenInfo(
   const distinct = new Set(Object.values(values));
   const info: ResolvedTokenInfo = { values, themed: distinct.size > 1 };
   const appkit = appkitHints[tokenPath];
-  if (appkit) info.appkit = appkit;
+  if (appkit && isUsefulAppkitHint(appkit)) info.appkit = appkit;
   design.globalVars.tokens[tokenPath] = info;
 }
 

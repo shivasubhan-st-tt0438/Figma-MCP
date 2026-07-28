@@ -21,9 +21,7 @@ export interface SimplifiedComponentDefinition {
   variantProperties?: Record<string, string>;
   /** True when the component lives in another (library) file, not this one. */
   remote?: boolean;
-  /** Source library file name, resolved via the published-components API (see enrich-design.ts). */
-  library?: string;
-  /** True when `library` is Apple's macOS UI kit — the instance IS a stock AppKit control. */
+  /** True when the publishing library (resolved via enrich-design.ts, not persisted here) is Apple's macOS UI kit — the instance IS a stock AppKit control. */
   native?: boolean;
 }
 
@@ -34,9 +32,7 @@ export interface SimplifiedComponentSetDefinition {
   propertyDefinitions?: Record<string, SimplifiedPropertyDefinition>;
   /** True when the component set lives in another (library) file, not this one. */
   remote?: boolean;
-  /** Source library file name, resolved via the published-components API (see enrich-design.ts). */
-  library?: string;
-  /** True when `library` is Apple's macOS UI kit — instances ARE stock AppKit controls. */
+  /** True when the publishing library (resolved via enrich-design.ts, not persisted here) is Apple's macOS UI kit — instances ARE stock AppKit controls. */
   native?: boolean;
 }
 

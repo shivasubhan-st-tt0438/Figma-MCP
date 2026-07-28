@@ -29,7 +29,7 @@ const STYLE_REF_FIELDS = ["layout", "fills", "styles", "strokes", "effects", "te
 /** A design-token fill inlined with everything a consumer needs in place. */
 type InlineToken = { token: string } & ResolvedTokenInfo;
 
-type NativeNode = Omit<SimplifiedNode, (typeof STYLE_REF_FIELDS)[number] | "children"> & {
+export type NativeNode = Omit<SimplifiedNode, (typeof STYLE_REF_FIELDS)[number] | "children"> & {
   role: string;
   layout?: StyleTypes;
   fills?: StyleTypes | InlineToken | (unknown | InlineToken)[];
@@ -65,7 +65,15 @@ function classifyRole(node: SimplifiedNode): string {
   return type.toLowerCase() || "node";
 }
 
-function inlineNode(
+/**
+ * Inline one node's style refs in place. Exported so enrich-design.ts can
+ * reuse it for componentVariantReferences (see attachComponentVariantReferences) —
+ * those reference nodes come from a separate, small, one-off fetch and are
+ * always fully self-contained regardless of the primary response's output
+ * format, so they go through the same inlining independent of whether this
+ * particular fetch is yaml/json/native-*.
+ */
+export function inlineNode(
   node: SimplifiedNode,
   styles: Record<string, StyleTypes>,
   tokens: Record<string, ResolvedTokenInfo>,
@@ -115,6 +123,12 @@ function buildNativeDesign(design: SerializableDesign): unknown {
   return {
     metadata: design.metadata,
     nodes: design.nodes.map((node) => inlineNode(node, styles, tokens)),
+    // Already fully inlined by attachComponentVariantReferences (see
+    // enrich-design.ts) — passed through as-is, placed last so it reads as
+    // an appendix after the main tree rather than competing with it.
+    ...(design.componentVariantReferences && {
+      componentVariantReferences: design.componentVariantReferences,
+    }),
   };
 }
 

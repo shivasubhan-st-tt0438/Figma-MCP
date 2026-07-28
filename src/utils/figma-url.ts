@@ -29,3 +29,17 @@ export function parseFigmaUrl(input: string): FigmaUrlParts {
 
   return { fileKey, nodeId };
 }
+
+/**
+ * Non-throwing variant of parseFigmaUrl, for call sites checking whether an
+ * arbitrary string (e.g. a Dev Resources link that's usually a .swift path,
+ * a ticket URL, or a spec doc) happens to be a Figma design URL, rather than
+ * asserting that it must be one.
+ */
+export function tryParseFigmaUrl(input: string): FigmaUrlParts | undefined {
+  try {
+    return parseFigmaUrl(input);
+  } catch {
+    return undefined;
+  }
+}

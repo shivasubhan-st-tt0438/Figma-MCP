@@ -212,10 +212,17 @@ function buildSimplifiedLayoutValues(
 
   const layoutValues: SimplifiedLayout = { mode };
 
-  layoutValues.sizing = {
+  // A node with neither layoutSizingHorizontal nor layoutSizingVertical set
+  // (not part of any auto-layout system at all) resolves both axes to
+  // undefined — omit `sizing` entirely rather than emit an empty `{}` that
+  // conveys nothing.
+  const sizing: NonNullable<SimplifiedLayout["sizing"]> = {
     horizontal: convertSizing(n.layoutSizingHorizontal),
     vertical: convertSizing(n.layoutSizingVertical),
   };
+  if (sizing.horizontal !== undefined || sizing.vertical !== undefined) {
+    layoutValues.sizing = sizing;
+  }
 
   // Emit positioning relative to parent unless the parent's auto-layout already
   // places this child. `isLayout(parent)` also screens out top-level nodes

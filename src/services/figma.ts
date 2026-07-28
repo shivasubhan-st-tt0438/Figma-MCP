@@ -5,6 +5,7 @@ import type {
   GetFileMetaResponse,
   GetImageFillsResponse,
   GetCommentsResponse,
+  GetDevResourcesResponse,
   GetComponentResponse,
   GetComponentSetResponse,
   GetFileVersionsResponse,
@@ -388,6 +389,20 @@ export class FigmaService {
     // flat. Tolerate both so a wrapper change never breaks library resolution.
     const data = await this.request<GetFileMetaResponse & { file?: GetFileMetaResponse }>(endpoint);
     return data.file ?? data;
+  }
+
+  /**
+   * Get every Dev Mode resource link in a file — the {name, url} pairs
+   * designers pin to specific nodes via Dev Mode's "Dev resources" panel.
+   * Fetched unfiltered (single call) and matched to fetched nodes locally:
+   * the endpoint's node_ids query param exists, but a large fetched subtree
+   * would overflow the URL, and files rarely carry more than a handful of
+   * links — so filtering client-side is both simpler and safer.
+   */
+  async getDevResources(fileKey: string): Promise<GetDevResourcesResponse> {
+    const endpoint = `/files/${fileKey}/dev_resources`;
+    Logger.log(`Retrieving dev resources for file: ${fileKey}`);
+    return this.request<GetDevResourcesResponse>(endpoint);
   }
 
   /**

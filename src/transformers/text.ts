@@ -19,8 +19,18 @@ export type SimplifiedTextStyle = Partial<{
   // it. The base textStyle never emits NONE (defaults drop out).
   textDecoration: "STRIKETHROUGH" | "UNDERLINE" | "NONE";
   hyperlink: Hyperlink;
-  // Only non-zero flags are emitted; defaults stay out of the ref so two nodes
-  // that differ only in default flag values still dedupe.
+  // Figma's inspector "Position" dropdown (Normal/Superscript/Subscript) is
+  // really the SUPS/SUBS OpenType flags, but surfacing them by raw 4-letter
+  // tag makes a consumer guess what "SUPS: 1" means — pulled out into its own
+  // self-explanatory field instead. Never both at once (Figma's UI is a
+  // mutually-exclusive dropdown); SUPS wins on the (invalid) off chance both
+  // arrive set.
+  position: "superscript" | "subscript";
+  // Every other non-zero OpenType flag (ligatures, case, figure style,
+  // stylistic sets, ...), keyed by Figma's raw 4-letter tag — SUPS/SUBS are
+  // excluded here since `position` already covers them. Only non-zero flags
+  // are emitted; defaults stay out of the ref so two nodes that differ only
+  // in default flag values still dedupe.
   opentypeFlags: Record<string, number>;
   paragraphSpacing: number;
   paragraphIndent: number;
@@ -77,7 +87,7 @@ export function extractTextStyle(n: FigmaDocumentNode) {
           ? style.textDecoration
           : undefined,
       hyperlink: "hyperlink" in style && style.hyperlink ? style.hyperlink : undefined,
-      opentypeFlags: pickNonZeroFlags("opentypeFlags" in style ? style.opentypeFlags : undefined),
+      ...extractPositionAndFlags("opentypeFlags" in style ? style.opentypeFlags : undefined),
       paragraphSpacing:
         "paragraphSpacing" in style && style.paragraphSpacing && style.paragraphSpacing > 0
           ? style.paragraphSpacing
@@ -104,6 +114,31 @@ function pickNonZeroFlags(
     if (v) nonZero[k] = v;
   }
   return Object.keys(nonZero).length ? nonZero : undefined;
+}
+
+/**
+ * Split raw OpenType flags into Figma's "Position" dropdown (SUPS/SUBS,
+ * surfaced as a friendly label) and everything else (kept as raw tags). See
+ * the `position` field doc on SimplifiedTextStyle for why these two get
+ * pulled out instead of staying generic flag noise.
+ */
+function extractPositionAndFlags(flags: Record<string, number> | undefined): {
+  position?: "superscript" | "subscript";
+  opentypeFlags?: Record<string, number>;
+} {
+  const nonZero = pickNonZeroFlags(flags);
+  if (!nonZero) return {};
+
+  const position = nonZero.SUPS ? "superscript" : nonZero.SUBS ? "subscript" : undefined;
+  if (!position) return { opentypeFlags: nonZero };
+
+  const rest = Object.fromEntries(
+    Object.entries(nonZero).filter(([tag]) => tag !== "SUPS" && tag !== "SUBS"),
+  );
+  return {
+    position,
+    opentypeFlags: Object.keys(rest).length ? rest : undefined,
+  };
 }
 
 /**
@@ -663,9 +698,15 @@ function classifyRun(
         break;
       }
       case "opentypeFlags": {
-        const nonZero = pickNonZeroFlags(value as Record<string, number>);
-        if (nonZero) {
-          refDelta.opentypeFlags = nonZero;
+        const { position, opentypeFlags } = extractPositionAndFlags(
+          value as Record<string, number>,
+        );
+        if (position) {
+          refDelta.position = position;
+          hasRefProps = true;
+        }
+        if (opentypeFlags) {
+          refDelta.opentypeFlags = opentypeFlags;
           hasRefProps = true;
         }
         break;
