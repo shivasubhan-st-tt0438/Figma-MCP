@@ -112,6 +112,13 @@ function isUsefulAppkitHint(hint: string): boolean {
  * globalVars.tokens so consumers can answer "semantic or static?" without
  * re-deriving it. themed=true means the token's value differs across
  * appearance modes and must map to a dynamic color, never a hardcoded hex.
+ *
+ * Only ever called with a token matched against the local color token files
+ * (--color-tokens-dir) — by id or by color (see resolveVariableFillNames Pass
+ * 1) — so every token recorded here is presumed to be one of Apple's HIG
+ * system colors; native is always set true. A token resolved instead via the
+ * live Variables API (recordLiveTokenInfo, Pass 2) never matched the HIG
+ * export and is presumed custom — native is left absent there.
  */
 function recordTokenInfo(
   design: SimplifiedDesign,
@@ -140,6 +147,7 @@ function recordTokenInfo(
   const info: ResolvedTokenInfo = {
     values,
     themed: distinct.size > 1,
+    native: true,
   };
   const appkit = appkitHints[token.path];
   if (appkit && isUsefulAppkitHint(appkit)) info.appkit = appkit;
@@ -274,7 +282,10 @@ export async function resolveVariableFillNames(
 }
 
 /**
- * Record token metadata for a variable resolved via the live Variables API.
+ * Record token metadata for a variable resolved via the live Variables API —
+ * i.e. it did NOT match the local HIG color token files (see
+ * resolveVariableFillNames Pass 2). `native` is deliberately never set here;
+ * see recordTokenInfo and ResolvedTokenInfo.native.
  * Per-mode values come from the variable's own valuesByMode when they are
  * plain colors (aliases and non-color values are skipped — the name is still
  * the valuable part).

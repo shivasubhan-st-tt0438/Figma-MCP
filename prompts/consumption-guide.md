@@ -53,7 +53,10 @@ ClassName_functionName_variableName = a variable inside a method;
 functionName_variableName = a variable inside a free function, no class) —
 locate the outermost element first, search inside it for the next, and so
 on; the last element is the exact declaration. No scopePath means `symbol`
-names the whole type or a single top-level declaration directly.
+names the whole type or a single top-level declaration directly. A color
+token can also carry `native` (see the design-token rule above) — that one
+is a color-match HEURISTIC, not verified like this component flag; don't
+treat the two with the same confidence.
 
 ## SF Symbols
 

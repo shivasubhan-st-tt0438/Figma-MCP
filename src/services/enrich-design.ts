@@ -251,7 +251,7 @@ export function pruneNativeDecoration(design: SimplifiedDesign): void {
  * id matches any node whose final segment equals it; a multi-segment focus id
  * must match as a whole suffix.
  */
-function nodeMatchesFocus(nodeId: string, focusId: string): boolean {
+function nodeMatchesFocusId(nodeId: string, focusId: string): boolean {
   const normalize = (s: string): string => s.replace(/-/g, ":").replace(/^I/, "");
   const node = normalize(nodeId);
   const focus = normalize(focusId);
@@ -262,11 +262,60 @@ function nodeMatchesFocus(nodeId: string, focusId: string): boolean {
 }
 
 /**
+ * Find every node whose id or name matches focusNodeId. Id match is tried
+ * first (see nodeMatchesFocusId); if nothing matches by id, falls back to a
+ * case-insensitive `name` match — lets a caller say "frame 1" without having
+ * to match the layer's actual title-cased name exactly, or copy an id out of
+ * a prior fetch's output. Unlike ids, names aren't unique (the same design
+ * can have several nodes literally named e.g. "Frame 3465463"), so the name
+ * fallback returns EVERY matching node, not just one — the caller sees all of
+ * them as separate subtrees rather than one silently picked at random.
+ *
+ * Either way, a match is never searched for more matches inside its own
+ * subtree: a descendant sharing the same id is impossible (ids are unique),
+ * but a descendant sharing the same NAME is possible, and keeping it too
+ * would duplicate content already inside the kept ancestor's subtree.
+ */
+function findFocusMatches(
+  nodes: SimplifiedNode[],
+  focusNodeId: string,
+): { roots: SimplifiedNode[]; matchedBy: "id" | "name" | "none" } {
+  const idRoots: SimplifiedNode[] = [];
+  const collectById = (level: SimplifiedNode[]): void => {
+    for (const node of level) {
+      if (nodeMatchesFocusId(node.id, focusNodeId)) {
+        idRoots.push(node);
+      } else if (node.children) {
+        collectById(node.children);
+      }
+    }
+  };
+  collectById(nodes);
+  if (idRoots.length > 0) return { roots: idRoots, matchedBy: "id" };
+
+  const focusNameLower = focusNodeId.toLowerCase();
+  const nameRoots: SimplifiedNode[] = [];
+  const collectByName = (level: SimplifiedNode[]): void => {
+    for (const node of level) {
+      if (node.name.toLowerCase() === focusNameLower) {
+        nameRoots.push(node);
+      } else if (node.children) {
+        collectByName(node.children);
+      }
+    }
+  };
+  collectByName(nodes);
+  if (nameRoots.length > 0) return { roots: nameRoots, matchedBy: "name" };
+
+  return { roots: [], matchedBy: "none" };
+}
+
+/**
  * Scope the design to just the subtree(s) rooted at `focusNodeId`, dropping
  * every sibling branch. For a huge instance where the caller only cares about
  * one frame (and the rest blows the token budget), this is the only way to
  * narrow the result — the API can't fetch an instance-internal node alone
- * (see nodeMatchesFocus). Runs AFTER all full-tree enrichment so the kept
+ * (see findFocusMatches). Runs AFTER all full-tree enrichment so the kept
  * subtree already carries resolved variants/libraries/dev-resources/SF
  * symbols, and BEFORE icon download so only the focused subtree's icons are
  * fetched.
@@ -280,26 +329,20 @@ function nodeMatchesFocus(nodeId: string, focusId: string): boolean {
  * referents are gone. `globalVars` styles are intentionally NOT pruned here:
  * style refs are spread across many node fields and a missed one would dangle.
  */
-export function focusDesignSubtree(design: SimplifiedDesign, focusNodeId: string): void {
-  const roots: SimplifiedNode[] = [];
-  const collect = (nodes: SimplifiedNode[]): void => {
-    for (const node of nodes) {
-      if (nodeMatchesFocus(node.id, focusNodeId)) {
-        // Don't descend into a match — a nested match would be a subtree of
-        // one already kept, so keeping both would duplicate it.
-        roots.push(node);
-      } else if (node.children) {
-        collect(node.children);
-      }
-    }
-  };
-  collect(design.nodes);
+export function focusDesignSubtree(design: SimplifiedDesign, focusNodeId: string): boolean {
+  const { roots, matchedBy } = findFocusMatches(design.nodes, focusNodeId);
 
-  if (roots.length === 0) {
+  if (matchedBy === "none") {
+    // Deliberately does NOT prune here — the caller decides what a miss means
+    // (get-figma-data turns it into a search listing rather than dumping the
+    // full tree, which is the exact thing that was too big to want).
+    Logger.log(`focusNodeId "${focusNodeId}" matched no node id or name in the fetched tree.`);
+    return false;
+  }
+  if (matchedBy === "name" && roots.length > 1) {
     Logger.log(
-      `focusNodeId "${focusNodeId}" matched no node in the fetched tree — returning the full tree unscoped.`,
+      `focusNodeId "${focusNodeId}" matched ${roots.length} nodes by name (not unique in this tree) — keeping all of them as separate subtrees.`,
     );
-    return;
   }
   design.nodes = roots;
 
@@ -328,6 +371,92 @@ export function focusDesignSubtree(design: SimplifiedDesign, focusNodeId: string
     if (referencedSetIds.has(id)) keptSets[id] = set;
   }
   design.componentSets = keptSets;
+  return true;
+}
+
+export interface NameSearchMatch {
+  id: string;
+  name: string;
+  type: string;
+  /** Ancestor names from the fetched root down to this node, " > "-joined. */
+  path: string;
+}
+
+/**
+ * Find nodes by NAME, for discovery: the answer to "I want the Table Style
+ * component but don't have its id, and the full tree is too big to eyeball."
+ * The server already holds the whole tree in memory (Figma returns the entire
+ * instance regardless), so it can grep it and hand back just a compact index
+ * of hits — id + name + type + path — instead of serializing everything.
+ *
+ * Matching is token-AND, case-insensitive: a node matches when its lowercased
+ * name contains EVERY whitespace-separated word of the query, in any order.
+ * "table style" therefore hits "Table Style", "Style - Table", "TableStyle
+ * (large)" — forgiving of casing, word order, and surrounding text, which is
+ * what a human-supplied description needs.
+ *
+ * A match is never searched inside for more matches: the outermost matching
+ * node's subtree already contains any nested hits, so stopping there collapses
+ * "Table Style" (the frame) + its three inner "Table style" text labels down
+ * to the one container the caller almost certainly meant. This is what makes
+ * the common case resolve to a single, auto-focusable match.
+ */
+export function searchDesignByName(design: SimplifiedDesign, query: string): NameSearchMatch[] {
+  const tokens = query.toLowerCase().split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) return [];
+
+  const matches: NameSearchMatch[] = [];
+  const visit = (nodes: SimplifiedNode[], ancestors: string[]): void => {
+    for (const node of nodes) {
+      const nameLower = node.name.toLowerCase();
+      if (tokens.every((t) => nameLower.includes(t))) {
+        matches.push({
+          id: node.id,
+          name: node.name,
+          type: node.type,
+          path: [...ancestors, node.name].join(" > "),
+        });
+        // Don't descend — the kept subtree already contains any nested hits.
+      } else if (node.children) {
+        visit(node.children, [...ancestors, node.name]);
+      }
+    }
+  };
+  visit(design.nodes, []);
+  return matches;
+}
+
+/**
+ * Render a name-search result as a compact, AI-readable listing — the output
+ * returned when a `find` (or a `focusNodeId` miss) resolves to zero or many
+ * nodes rather than exactly one. Deliberately format-agnostic (not the design
+ * serializer): it's a directory of candidates telling the agent which id to
+ * re-fetch with focusNodeId, not design data to consume.
+ */
+export function renderNameSearchListing(query: string, matches: NameSearchMatch[]): string {
+  const MAX = 100;
+  const shown = matches.slice(0, MAX);
+  const lines: string[] = [];
+
+  if (matches.length === 0) {
+    lines.push(`# No node name matched all words in "${query}".`);
+    lines.push(
+      `# Try a single distinctive word, or fetch without 'find' to see the tree (may be large).`,
+    );
+    return lines.join("\n");
+  }
+
+  lines.push(`# ${matches.length} node(s) matched "${query}" by name (case-insensitive).`);
+  lines.push(`# Re-fetch with focusNodeId set to the id of the one you want.`);
+  if (matches.length > MAX) lines.push(`# (showing first ${MAX})`);
+  lines.push("matches:");
+  for (const m of shown) {
+    lines.push(`  - id: ${m.id}`);
+    lines.push(`    name: ${m.name}`);
+    lines.push(`    type: ${m.type}`);
+    lines.push(`    path: ${m.path}`);
+  }
+  return lines.join("\n");
 }
 
 /**
@@ -778,9 +907,9 @@ export const CONSUMPTION_GUIDE: readonly string[] = parseMarkdownRules(
 
 /** Describes where a design-token fill/stroke resolves to — differs by output format (see native-json.ts). */
 const TOKEN_INDIRECTION_NATIVE =
-  "fills/strokes with snake_case names are design tokens, inlined in place as { token, values, themed, appkit? } — no lookup elsewhere in the document. themed: true means the design defines different Light and Dark values — but per the LIGHT THEME ONLY rule below, implement the Light value (values.Light); values.Dark is reference data, not something to build. appkit, when present, means this token is a material/vibrancy effect (NSVisualEffectView.Material.*), not a flat color — build it as such; absent means it's a plain color, use the Light value directly (a suggested NSColor name is deliberately not included there, since Light Theme Only already overrides it). approx: true means the token name was inferred by color match (the bound variable's ID wasn't in the local token exports) — treat it as a best guess and verify against the design, because the API's color snapshot for a variable-bound fill can lag the variable's live value.";
+  "fills/strokes with snake_case names are design tokens, inlined in place as { token, values, themed, appkit?, native?, approx? } — no lookup elsewhere in the document. themed: true means the design defines different Light and Dark values — but per the LIGHT THEME ONLY rule below, implement the Light value (values.Light); values.Dark is reference data, not something to build. appkit, when present, means this token is a material/vibrancy effect (NSVisualEffectView.Material.*), not a flat color — build it as such; absent means it's a plain color, use the Light value directly (a suggested NSColor name is deliberately not included there, since Light Theme Only already overrides it). native: true means this color matched Apple's HIG color token exports (by id or by color) — UNLIKE a component's native flag this is a heuristic, not a verified fact (Figma's API has no way to confirm which library published a variable); a custom color that happens to also be black/white/gray at a common opacity can match and be flagged native incorrectly — treat as a suggestion to verify, not ground truth. Absent means resolved only via this file's own variables — presumed custom. approx: true means the token name was inferred by color match (the bound variable's ID wasn't in the local token exports) — treat it as a best guess and verify against the design, because the API's color snapshot for a variable-bound fill can lag the variable's live value.";
 const TOKEN_INDIRECTION_REF =
-  "fills/strokes with snake_case names are design tokens — per-mode values under globalVars.tokens[name]. themed: true means the design defines different Light and Dark values — but per the LIGHT THEME ONLY rule below, implement the Light value (values.Light); values.Dark is reference data, not something to build. appkit, when present, means this token is a material/vibrancy effect (NSVisualEffectView.Material.*), not a flat color — build it as such; absent means it's a plain color, use the Light value directly. approx: true means the token name was inferred by color match (the bound variable's ID wasn't in the local token exports) — treat it as a best guess and verify against the design, because the API's color snapshot for a variable-bound fill can lag the variable's live value.";
+  "fills/strokes with snake_case names are design tokens — per-mode values under globalVars.tokens[name]. themed: true means the design defines different Light and Dark values — but per the LIGHT THEME ONLY rule below, implement the Light value (values.Light); values.Dark is reference data, not something to build. appkit, when present, means this token is a material/vibrancy effect (NSVisualEffectView.Material.*), not a flat color — build it as such; absent means it's a plain color, use the Light value directly. native: true means this color matched Apple's HIG color token exports (by id or by color) — UNLIKE a component's native flag this is a heuristic, not a verified fact (Figma's API has no way to confirm which library published a variable); a custom color that happens to also be black/white/gray at a common opacity can match and be flagged native incorrectly — treat as a suggestion to verify, not ground truth. Absent means resolved only via this file's own variables — presumed custom. approx: true means the token name was inferred by color match (the bound variable's ID wasn't in the local token exports) — treat it as a best guess and verify against the design, because the API's color snapshot for a variable-bound fill can lag the variable's live value.";
 
 /**
  * Project directive: how to behave when using this MCP, not how to parse its

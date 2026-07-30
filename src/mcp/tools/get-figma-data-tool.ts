@@ -23,6 +23,12 @@ const nodeIdSchema = z
 
 const fileKeySchema = z.string().regex(/^[a-zA-Z0-9]+$/, "File key must be alphanumeric");
 
+// Deliberately permissive (not nodeIdSchema): focusNodeId accepts either a
+// node id OR a plain layer/frame name (e.g. "Frame 1") as a fallback — see
+// findFocusMatches in enrich-design.ts. A strict id-shaped regex here would
+// reject the name form before it ever reached that fallback.
+const focusNodeIdSchema = z.string().min(1);
+
 const targetSchema = z.object({
   fileKey: fileKeySchema.describe(
     "The key of the Figma file to fetch, often found in a provided URL like figma.com/(file|design)/<fileKey>/...",
@@ -40,7 +46,7 @@ const targetSchema = z.object({
     .boolean()
     .optional()
     .describe("Same as the top-level downloadIcons, scoped to this target."),
-  focusNodeId: nodeIdSchema
+  focusNodeId: focusNodeIdSchema
     .optional()
     .describe("Same as the top-level focusNodeId, scoped to this target."),
 });
@@ -68,10 +74,15 @@ const parameters = {
     .describe(
       "Auto-download every icon (IMAGE-SVG node) in the fetched tree as a vector PDF into the server's image directory, and stamp iconFile (the saved filename) on each icon node in the response — no separate download_figma_images call needed per icon. Recommended whenever this fetch is for implementing or comparing UI, not for a quick structural read.",
     ),
-  focusNodeId: nodeIdSchema
+  focusNodeId: focusNodeIdSchema
     .optional()
     .describe(
-      "OPTIONAL. Scope the result to ONLY the subtree rooted at this node id, dropping every sibling branch — use when the fetched node is a large frame/instance but you only need one child frame out of it (and the full tree is too big / blows the token budget). The Figma API can't fetch an instance-internal node on its own, so this prunes the built tree instead. Accepts the full instance-internal id ('I3096:91050;1907:3787', as it appears in a prior fetch's output) OR the bare local id ('1907:3787'); both resolve to the same node. If it matches nothing, the full tree is returned unchanged.",
+      "OPTIONAL. Scope the result to ONLY the subtree(s) matching this node id OR layer/frame name, dropping every sibling branch — use when you ALREADY KNOW the exact node id or name and the full tree is too big / blows the token budget. The Figma API can't fetch an instance-internal node on its own, so this prunes the built tree instead. Accepts the full instance-internal id ('I3096:91050;1907:3787', as it appears in a prior fetch's output), the bare local id ('1907:3787'), or the exact layer name ('Frame 1', case-insensitive — 'frame 1' matches too) — id is tried first, name is an exact-match fallback. Names aren't guaranteed unique: if several nodes share that name, ALL are kept as separate subtrees. If nothing matches, you get a candidate listing (like `find`) instead of the full tree. When you only have a rough/partial name, prefer `find`.",
+    ),
+  find: focusNodeIdSchema
+    .optional()
+    .describe(
+      "OPTIONAL. DISCOVERY: locate a node by a partial/rough NAME when you don't know its id — the right first step when a large node was given but you only want one part of it (e.g. fetch 'the table style component' out of a whole screen). Matches token-AND, case-insensitive: every space-separated word must appear somewhere in a node's name, in any order ('table style' matches 'Table Style', 'Style - Table', etc). If EXACTLY ONE node matches, the result is that node's full focused detail (as if you'd passed its id to focusNodeId) — one call, done. If ZERO or MANY match, the result is a compact candidate listing (id + name + type + path per hit), NOT the full tree — read it, then re-fetch with focusNodeId set to the id you want. Takes precedence over focusNodeId. downloadIcons applies only when a single match auto-focuses.",
     ),
   targets: z
     .array(targetSchema)
@@ -103,7 +114,7 @@ async function getFigmaData(
 ) {
   try {
     const parsed = parametersSchema.parse(params);
-    const { nodeId: rawNodeId, depth, downloadIcons, focusNodeId, targets } = parsed;
+    const { nodeId: rawNodeId, depth, downloadIcons, focusNodeId, find, targets } = parsed;
 
     if (targets && targets.length > 0) {
       if (parsed.fileKey) {
@@ -168,7 +179,7 @@ async function getFigmaData(
 
     const result = await runGetFigmaData(
       figmaService,
-      { fileKey, nodeId, depth, downloadIcons, focusNodeId },
+      { fileKey, nodeId, depth, downloadIcons, focusNodeId, find },
       outputFormat,
       {
         colorTokensDir,

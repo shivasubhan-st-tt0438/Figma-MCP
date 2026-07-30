@@ -24,6 +24,8 @@ import {
   resolveComponentLibraries,
   pruneNativeDecoration,
   focusDesignSubtree,
+  searchDesignByName,
+  renderNameSearchListing,
   attachDevResources,
   attachDevResourcesBatch,
   annotateSfSymbols,
@@ -45,13 +47,23 @@ export type GetFigmaDataInput = {
    */
   downloadIcons?: boolean;
   /**
-   * Scope the result to just the subtree rooted at this node id, dropping all
-   * sibling branches — for a huge instance where only one frame is wanted.
-   * Accepts the full instance-internal id ("I3096:91050;1907:3787") or the
-   * bare local id ("1907:3787"); see focusDesignSubtree. No-op if it matches
-   * nothing (full tree returned).
+   * Scope the result to just the subtree(s) matching this node id or layer
+   * name, dropping all sibling branches — for a huge instance where only one
+   * frame is wanted. Accepts the full instance-internal id
+   * ("I3096:91050;1907:3787"), the bare local id ("1907:3787"), or a plain
+   * layer name ("Frame 1", case-insensitive) as a fallback when no id is on
+   * hand; see focusDesignSubtree/findFocusMatches. A miss returns a search
+   * listing (see `find`) rather than the full tree.
    */
   focusNodeId?: string;
+  /**
+   * Discovery: find a node by (partial) NAME without knowing its id. Searches
+   * the tree token-AND case-insensitively (see searchDesignByName). Exactly
+   * one match auto-focuses to it (same as passing its id as focusNodeId);
+   * zero or many matches return a compact candidate listing to pick a
+   * focusNodeId from — never the full tree. Takes precedence over focusNodeId.
+   */
+  find?: string;
 };
 
 export type GetFigmaDataResult = {
@@ -114,10 +126,14 @@ export async function getFigmaData(
   outputFormat: OutputFormat,
   hooks: GetFigmaDataHooks = {},
 ): Promise<GetFigmaDataResult> {
-  const { fileKey, nodeId, depth, downloadIcons: shouldDownloadIcons, focusNodeId } = input;
+  const { fileKey, nodeId, depth, downloadIcons: shouldDownloadIcons, focusNodeId, find } = input;
   const startedAt = Date.now();
   let metrics: GetFigmaDataMetrics | undefined;
   let caughtError: unknown;
+  // When a `find` (or a focusNodeId miss) resolves to zero or many nodes, the
+  // response is a compact candidate listing instead of the serialized design —
+  // held here so the serialize step emits it in place of the full tree.
+  let findListing: string | undefined;
   // Per-call counter shared with the walker. Lives in the call closure so
   // overlapping HTTP requests each have their own — no module-global state.
   const nodeCounter = { count: 0 };
@@ -180,15 +196,37 @@ export async function getFigmaData(
       // must still resolve before that node is potentially pruned away.
       pruneNativeDecoration(simplifiedDesign);
       annotateSfSymbols(simplifiedDesign);
-      // Scope to the requested subtree BEFORE downloading icons, so a focused
-      // fetch only downloads that subtree's icons — not the whole instance's.
-      if (focusNodeId) {
-        focusDesignSubtree(simplifiedDesign, focusNodeId);
+      // Resolve `find`/`focusNodeId` BEFORE downloading icons, so a scoped
+      // fetch only downloads its subtree's icons — not the whole instance's.
+      // `find` is discovery: one match auto-focuses; zero/many produce a
+      // candidate listing (findListing) instead of the full tree. A
+      // focusNodeId miss falls back to the same listing rather than dumping
+      // everything — the very thing the caller was trying to narrow down.
+      if (find) {
+        const matches = searchDesignByName(simplifiedDesign, find);
+        if (matches.length === 1) {
+          focusDesignSubtree(simplifiedDesign, matches[0].id);
+        } else {
+          findListing = renderNameSearchListing(find, matches);
+        }
+      } else if (focusNodeId) {
+        const matched = focusDesignSubtree(simplifiedDesign, focusNodeId);
+        if (!matched) {
+          findListing = renderNameSearchListing(
+            focusNodeId,
+            searchDesignByName(simplifiedDesign, focusNodeId),
+          );
+        }
       }
-      if (shouldDownloadIcons && hooks.imageDir) {
-        await downloadIcons(simplifiedDesign, figmaService, fileKey, hooks.imageDir);
+      // A candidate listing is a directory of ids, not design data — skip icon
+      // download and the consumption guide, which only make sense for a real
+      // (whole or focused) design tree.
+      if (!findListing) {
+        if (shouldDownloadIcons && hooks.imageDir) {
+          await downloadIcons(simplifiedDesign, figmaService, fileKey, hooks.imageDir);
+        }
+        addConsumptionGuide(simplifiedDesign, outputFormat);
       }
-      addConsumptionGuide(simplifiedDesign, outputFormat);
     } catch (error) {
       tagError(error, { phase: "simplify" });
     } finally {
@@ -207,7 +245,8 @@ export async function getFigmaData(
     const serializeStart = Date.now();
     let formatted: string;
     try {
-      formatted = serializeResult(wrapForSerialization(simplifiedDesign), outputFormat);
+      formatted =
+        findListing ?? serializeResult(wrapForSerialization(simplifiedDesign), outputFormat);
     } catch (error) {
       tagError(error, { phase: "serialize" });
     }

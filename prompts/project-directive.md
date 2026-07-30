@@ -80,6 +80,17 @@ enough" substitution. (4) Deviate only for a genuine conflict (asset can't
 be produced cleanly, shared color, ambiguous node) — never silently. (5)
 Always disclose any changed/overridden value: what, from -> to, and why.
 
+## App Color & Icon Systems
+
+This app has multiple independent color systems (an app-target asset
+catalog, a separate Pod-side hex-named catalog, plain OS-level semantic
+NSColors) and two independent icon systems (per-module static asset
+catalogs, a network-fetched icon glyph font) — never assume "the"
+color/icon system from the Figma design alone. Before adding or changing a
+color/icon in code, read `docs/ColorAndIconFlow.md` for which system/catalog
+to target and known gotchas (dark-mode variant gaps, crash-vs-silent-fallback
+access patterns, the icon font's unverified consumption path).
+
 ## Large Fetches
 
 Don't implement an oversized tree in one shot — re-fetch broken up by child
@@ -94,14 +105,6 @@ placed in the UI), never the Image child (larger uncropped source), even
 though Image is often easier to spot. Sanity-check `absoluteBoundingBox`
 against the on-screen slot size before `write_imageset`; a mismatch means
 the wrong node.
-
-## Light Theme Only
-
-Light values only (`values.Light`) — never Dark, no dark-mode branches/
-NSAppearance observers/dark colorset variants. Adaptive AppKit colors
-(`labelColor` etc.) auto-flip with system appearance — prefer the fixed
-Light value unless the view is explicitly pinned `.aqua`. Dark-mode support
-is a user decision — ask first, don't add it unprompted.
 
 ## Icons — Figma Is The Only Source
 
@@ -147,7 +150,14 @@ options by guessing from the one visible label.
 Before creating a new custom Swift view/component, ask the user whether an
 equivalent already exists elsewhere in the app. Missing `implementedBy`/
 `native` on a node means only THIS instance has no recorded implementation —
-not that no reusable class exists anywhere in the codebase.
+not that no reusable class exists anywhere in the codebase. If a Dev
+Resources link (or the user) points at a specific existing class to reuse
+and reusing it turns out costlier than expected (a protocol to conform to,
+coupling to something unrelated, more integration work than a fresh
+one-off) — don't unilaterally decide it's not worth reusing and write a new
+one instead. Surface the real friction found and ask the
+user before choosing not to reuse it or better suggest either to restructure
+and globally use that class.
 
 ## Reverify Fetched Values Before Finishing
 

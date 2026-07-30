@@ -47,6 +47,27 @@ export type ResolvedTokenInfo = {
    * token. Absent = resolved by exact variable ID, fully trustworthy.
    */
   approx?: true;
+  /**
+   * Present (true) when this token matched an entry in the local color token
+   * files (--color-tokens-dir), by id or by color — i.e. it's presumed to be
+   * one of Apple's HIG system colors rather than a color this app defines
+   * itself. Absent = resolved only via this file's own live Variables API,
+   * i.e. a variable local to (or at least not found in) the HIG export —
+   * presumed custom.
+   *
+   * UNLIKE a component's `native` (a verified fact — resolved via the actual
+   * publishing library, see resolveComponentLibraries), this is a HEURISTIC:
+   * Figma's REST API has no way to ask "which library published this
+   * variable" (no keyed lookup exists for variables, unlike components — see
+   * enrich-design.ts's isAppleMacosLibrary comment). Matching by hex+alpha
+   * against the HIG export is a proxy, and common colors collide: the HIG
+   * export alone has #000000 under 15+ different token names (Text-Opaque/*,
+   * Fills/*, at various alphas) and #F6F6F6 under 4 (all the Materials/*
+   * tiers) — a custom color that happens to also be black/white/gray at a
+   * common opacity will match and be flagged native even though it isn't.
+   * Treat this as a suggestion to verify, not ground truth.
+   */
+  native?: true;
 };
 
 export interface TraversalContext {
