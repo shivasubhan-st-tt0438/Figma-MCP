@@ -95,9 +95,10 @@ describe("Method not allowed", () => {
     }
   });
 
-  it("GET /mcp returns 405", async () => {
+  it("GET /mcp returns a human-readable health check, not a JSON-RPC response", async () => {
     const res = await fetch(`http://127.0.0.1:${port}/mcp`, { method: "GET" });
-    expect(res.status).toBe(405);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("Figma MCP server is running");
   });
 
   it("DELETE /mcp returns 405", async () => {
@@ -105,9 +106,10 @@ describe("Method not allowed", () => {
     expect(res.status).toBe(405);
   });
 
-  it("GET /sse returns 405", async () => {
+  it("GET /sse returns a human-readable health check, not a JSON-RPC response", async () => {
     const res = await fetch(`http://127.0.0.1:${port}/sse`, { method: "GET" });
-    expect(res.status).toBe(405);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("Figma MCP server is running");
   });
 
   it("DELETE /sse returns 405", async () => {

@@ -169,12 +169,24 @@ export async function startHttpServer(
     res.status(405).set("Allow", "POST").send("Method Not Allowed");
   };
 
+  // No MCP client ever sends a real protocol message via GET (this transport
+  // is POST-only, stateless — see the loop below); a plain GET only happens
+  // when a human pastes the URL into a browser to sanity-check reachability.
+  // 200 + a short message turns that into an actual signal ("I got a reply")
+  // instead of an unhelpful blank 405 that looks identical to "unreachable."
+  const handleHealthCheck = (_req: Request, res: Response) => {
+    res
+      .status(200)
+      .type("text/plain")
+      .send("Figma MCP server is running. POST JSON-RPC to this URL for MCP protocol messages.");
+  };
+
   // Mount stateless StreamableHTTP on both /mcp and /sse.
   // Serving StreamableHTTP at /sse lets existing client configs keep working —
   // modern MCP clients probe with a POST before falling back to SSE.
   for (const path of ["/mcp", "/sse"]) {
     app.post(path, handlePost);
-    app.get(path, handleMethodNotAllowed);
+    app.get(path, handleHealthCheck);
     app.delete(path, handleMethodNotAllowed);
   }
 
