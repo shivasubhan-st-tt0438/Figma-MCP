@@ -21,10 +21,88 @@ import type { SimplifiedNode, StyleTypes, ResolvedTokenInfo } from "~/extractors
  *
  * native-yaml is the same structure serialized as YAML — the preferred form
  * for LLM consumers (sequential reading, no cross-document indirection).
+ *
+ * Both native formats also **compact** the output: verbose property names are
+ * abbreviated (absoluteBoundingBox → bounds, locationRelativeToParent → loc,
+ * etc.) and compound instance IDs are stripped to their last segment. A `keys`
+ * legend in the metadata maps every abbreviation back to its full name.
  */
 
 /** Style-bearing fields on a SimplifiedNode that hold a globalVars ref id. */
 const STYLE_REF_FIELDS = ["layout", "fills", "styles", "strokes", "effects", "textStyle"] as const;
+
+// ── Key compaction ──────────────────────────────────────────────────────
+// Applied post-inlining at the serialization boundary. Internal types keep
+// their full names; only the final output shrinks.
+
+const KEY_MAP: Record<string, string> = {
+  // node-level (appear on every node)
+  absoluteBoundingBox: "bounds",
+  parentName: "parent",
+  siblingIndex: "idx",
+  // layout (very high frequency)
+  locationRelativeToParent: "loc",
+  dimensions: "dim",
+  width: "w",
+  height: "h",
+  horizontal: "hor",
+  vertical: "ver",
+  justifyContent: "justify",
+  alignItems: "align",
+  padding: "pad",
+  overflowScroll: "overflow",
+  // component (medium frequency)
+  componentProperties: "props",
+  componentPropertyReferences: "propRefs",
+  componentId: "compId",
+  componentSetId: "compSetId",
+  variantProperties: "variants",
+  propertyDefinitions: "propDefs",
+  // text style
+  textStyle: "ts",
+  fontSize: "fs",
+  fontWeight: "fw",
+  fontFamily: "ff",
+  lineHeight: "lh",
+  letterSpacing: "ls",
+  textAlignHorizontal: "textAlignH",
+  textAlignVertical: "textAlignV",
+  // visual
+  borderRadius: "radius",
+  strokeWeight: "sw",
+  strokeWeights: "sws",
+  strokeDashes: "dashes",
+  fillVariableIds: "fillVars",
+  blendMode: "blend",
+  boldWeight: "bw",
+  // attachments
+  implementedBy: "impl",
+  iconFile: "icon",
+  sfSymbols: "sf",
+};
+
+const KEY_LEGEND = Object.entries(KEY_MAP)
+  .map(([full, short]) => `${short}=${full}`)
+  .join(" ");
+
+function compactId(id: string): string {
+  const last = id.lastIndexOf(";");
+  return last >= 0 ? id.substring(last + 1) : id;
+}
+
+function compactOutput(value: unknown): unknown {
+  if (value === null || value === undefined) return value;
+  if (typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map(compactOutput);
+
+  const obj = value as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const [key, val] of Object.entries(obj)) {
+    const newKey = KEY_MAP[key] ?? key;
+    out[newKey] = key === "id" && typeof val === "string" ? compactId(val) : compactOutput(val);
+  }
+  return out;
+}
 
 /** A design-token fill inlined with everything a consumer needs in place. */
 type InlineToken = { token: string } & ResolvedTokenInfo;
@@ -121,7 +199,7 @@ function buildNativeDesign(design: SerializableDesign): unknown {
   const styles = design.globalVars?.styles ?? {};
   const tokens = design.globalVars?.tokens ?? {};
   return {
-    metadata: design.metadata,
+    metadata: { ...design.metadata, keys: KEY_LEGEND },
     nodes: design.nodes.map((node) => inlineNode(node, styles, tokens)),
     // Already fully inlined by attachComponentVariantReferences (see
     // enrich-design.ts) — passed through as-is, placed last so it reads as
@@ -133,9 +211,9 @@ function buildNativeDesign(design: SerializableDesign): unknown {
 }
 
 export function toNativeJson(design: SerializableDesign): string {
-  return JSON.stringify(buildNativeDesign(design), null, 2);
+  return JSON.stringify(compactOutput(buildNativeDesign(design)), null, 2);
 }
 
 export function toNativeYaml(design: SerializableDesign): string {
-  return dumpYaml(buildNativeDesign(design));
+  return dumpYaml(compactOutput(buildNativeDesign(design)));
 }

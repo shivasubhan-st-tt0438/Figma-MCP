@@ -768,7 +768,6 @@ async function fetchComponentVariantReference(
  */
 function stripReferenceRelationalFields(node: NativeNode): void {
   delete node.siblingIndex;
-  delete node.parentId;
   delete node.parentName;
   if (node.layout && typeof node.layout === "object" && !Array.isArray(node.layout)) {
     const layout = node.layout as {

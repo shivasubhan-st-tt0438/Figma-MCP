@@ -13,24 +13,42 @@ _Each heading becomes "HEADING: body text" with the body's internal
 whitespace/newlines collapsed to single spaces — write body paragraphs
 wrapped however is readable here, it renders as one line downstream._
 
+## Compact Keys
+
+Output keys are abbreviated to save tokens (metadata.keys carries this same
+mapping generated live, so it can never drift from this list). Full list,
+short=full: bounds=absoluteBoundingBox parent=parentName idx=siblingIndex
+loc=locationRelativeToParent dim=dimensions w=width h=height hor=horizontal
+ver=vertical justify=justifyContent align=alignItems pad=padding
+overflow=overflowScroll props=componentProperties propRefs=
+componentPropertyReferences compId=componentId compSetId=componentSetId
+variants=variantProperties propDefs=propertyDefinitions ts=textStyle
+fs=fontSize fw=fontWeight ff=fontFamily lh=lineHeight ls=letterSpacing
+textAlignH=textAlignHorizontal textAlignV=textAlignVertical radius=
+borderRadius sw=strokeWeight sws=strokeWeights dashes=strokeDashes
+fillVars=fillVariableIds blend=blendMode bw=boldWeight impl=implementedBy
+icon=iconFile sf=sfSymbols. Compound instance IDs are stripped to the last
+segment (the component definition id) — e.g.
+"I3096:91050;1907:3788;2150:30288" -> "2150:30288".
+
 ## Layout Mapping
 
-layout: mode/gap/padding/sizing map to NSStackView (orientation, spacing,
-edgeInsets); sizing hug = size-to-content, fill = stretch. Add width/height
-constraints ONLY when sizing is 'fixed' (value in layout dimensions).
-absoluteBoundingBox is the rendered size for reference/verification — never
+layout: mode/gap/pad/sizing map to NSStackView (orientation, spacing,
+edgeInsets); sizing hug = size-to-content, fill = stretch. Add w/h
+constraints ONLY when sizing is 'fixed' (value in layout dim).
+bounds is the rendered size for reference/verification — never
 hardcode it as constraints alongside stack layout.
 
 ## Layout Constraints
 
 layout.constraints = Figma's resize-pinning -> real NSLayoutConstraint
-anchors, never a fixed x/y frame. horizontal: LEFT->leadingAnchor,
+anchors, never a fixed x/y frame. hor: LEFT->leadingAnchor,
 RIGHT->trailingAnchor, LEFT_RIGHT->pin both (flexes with parent),
-CENTER->centerXAnchor, SCALE->proportional width. vertical: TOP->topAnchor,
+CENTER->centerXAnchor, SCALE->proportional width. ver: TOP->topAnchor,
 BOTTOM->bottomAnchor, TOP_BOTTOM->pin both (flexes), CENTER->centerYAnchor,
 SCALE->proportional height. Leading/top pin distance =
-locationRelativeToParent (x/y); trailing/bottom = parent size minus
-(position + size), from the parent's absoluteBoundingBox. Has constraints ->
+loc (x/y); trailing/bottom = parent size minus
+(position + size), from the parent's bounds. Has constraints ->
 NOT in an auto-layout flow -> use anchors, not NSStackView. No constraints
 but parent's layout.mode is row/column -> IS in the flow -> use NSStackView
 instead. Never mix both for the same node.
@@ -43,7 +61,7 @@ decomposition of that control (drawn cursors, chevrons, placeholder layers)
 — mine them for strings/icons/state, never rebuild as views; a native
 node's children already got pruned out of this fetch when nothing in them
 was mineable. No `native` -> this app's own custom component -> map to its
-Swift class, not stock AppKit. `implementedBy` overrides `native` — the
+Swift class, not stock AppKit. `impl` overrides `native` — the
 design team already has a real implementation for this exact instance, use
 it instead of the stock control even though native: true is also set.
 Resolve `symbol` via `scopePath` when present (underscore-separated,
@@ -59,7 +77,7 @@ names the whole type or a single top-level declaration directly.
 
 {sf:name} inside text is an SF Symbol — set it via
 NSImage(systemSymbolName:) on the control (names also listed under the
-node's sfSymbols); it is not literal string content.
+node's sf); it is not literal string content.
 
 ## Box Shadow
 

@@ -349,7 +349,8 @@ function resolveStyleKey(
 
 /**
  * Extracts spatial and structural metadata for every node:
- * - parentId / parentName: which component/frame is the immediate parent
+ * - parentName: which component/frame is the immediate parent (name only —
+ *   see SimplifiedNode.parentName for why the id isn't also kept)
  * - siblingIndex: zero-based position among the parent's children
  * - absoluteBoundingBox: width, height (canvas-absolute size only)
  * - rotation: non-zero rotation in degrees
@@ -365,7 +366,6 @@ function resolveStyleKey(
 export const nodeMetaExtractor: ExtractorFn = (node, result, context) => {
   // Parent reference — makes the tree self-documenting
   if (context.parent) {
-    result.parentId = context.parent.id;
     result.parentName = context.parent.name;
   }
 

@@ -256,7 +256,7 @@ describe("attachDevResources — component variant references", () => {
     const nodes = entry.nodes as Record<string, unknown>[];
     expect(nodes).toHaveLength(1);
     const section = nodes[0];
-    expect(section.parentId).toBeUndefined();
+    expect(section.parentName).toBeUndefined();
     expect(section.siblingIndex).toBeUndefined();
     const sectionLayout = section.layout as Record<string, unknown>;
     expect(sectionLayout.gap).toBeUndefined();
@@ -266,7 +266,6 @@ describe("attachDevResources — component variant references", () => {
     const variants = section.children as Record<string, unknown>[];
     expect(variants).toHaveLength(2);
     for (const variant of variants) {
-      expect(variant.parentId).toBeUndefined();
       expect(variant.parentName).toBeUndefined();
       expect(variant.siblingIndex).toBeUndefined();
       const variantLayout = variant.layout as Record<string, unknown> | undefined;

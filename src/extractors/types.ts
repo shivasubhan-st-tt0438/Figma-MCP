@@ -151,7 +151,7 @@ export interface SimplifiedDesign {
    * two. Each entry is already fully self-contained (styles inlined, not
    * globalVars refs, regardless of this response's own output format) and
    * stripped of fields that only describe this specific reference layout —
-   * siblingIndex, parentId/parentName, and the gap/padding/
+   * siblingIndex, parentName, and the gap/padding/
    * locationRelativeToParent that only exist to arrange documentation
    * swatches — since none of that is real app layout. Loosely typed (not
    * SimplifiedNode) because the shape is post-inlining (see NativeNode in
@@ -245,8 +245,11 @@ export interface SimplifiedNode {
   componentId?: string;
   componentProperties?: Record<string, boolean | string>;
   componentPropertyReferences?: Record<string, string>;
-  // spatial metadata — parent reference and sibling order
-  parentId?: string;
+  // spatial metadata — parent reference and sibling order. Only the name is
+  // kept: the id would just duplicate the tree's own nesting (a consumer
+  // already sees the parent as the enclosing block) while being a longer,
+  // opaque compound-instance string — the name is the only part that adds
+  // readable signal.
   parentName?: string;
   siblingIndex?: number;
   // canvas-absolute size only — no x/y (see nodeMetaExtractor for why)
