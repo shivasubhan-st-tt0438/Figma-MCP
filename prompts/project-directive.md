@@ -89,7 +89,13 @@ catalogs, a network-fetched icon glyph font) — never assume "the"
 color/icon system from the Figma design alone. Before adding or changing a
 color/icon in code, read `docs/ColorAndIconFlow.md` for which system/catalog
 to target and known gotchas (dark-mode variant gaps, crash-vs-silent-fallback
-access patterns, the icon font's unverified consumption path).
+access patterns, the icon font's unverified consumption path). Never map a
+fetched color to an `NSColor.*` semantic name yourself, even if its value
+looks like a standard OS color — per LIGHT THEME ONLY the fixed Light value
+is what gets built, and a semantic NSColor would track system appearance
+instead, which is wrong here regardless of how "system-like" the color
+looks. For whether/how an OS-level color genuinely applies, read the docs
+above rather than guessing.
 
 ## Large Fetches
 
