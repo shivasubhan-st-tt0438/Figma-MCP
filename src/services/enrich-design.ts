@@ -315,10 +315,11 @@ function findFocusMatches(
  * every sibling branch. For a huge instance where the caller only cares about
  * one frame (and the rest blows the token budget), this is the only way to
  * narrow the result — the API can't fetch an instance-internal node alone
- * (see findFocusMatches). Runs AFTER all full-tree enrichment so the kept
- * subtree already carries resolved variants/libraries/dev-resources/SF
- * symbols, and BEFORE icon download so only the focused subtree's icons are
- * fetched.
+ * (see findFocusMatches). Runs BEFORE all enrichment (variants/libraries/
+ * dev-resources/SF symbols/icons) so every enrichment API call afterward is
+ * scoped to the kept subtree, not the whole file — a miss short-circuits to a
+ * search listing (see get-figma-data.ts) before spending a single enrichment
+ * call on a tree the caller can't consume yet.
  *
  * Best-effort: if nothing matches, the tree is left untouched and a warning is
  * logged — returning an empty result would be strictly worse than returning
@@ -389,27 +390,26 @@ export interface NameSearchMatch {
  * instance regardless), so it can grep it and hand back just a compact index
  * of hits — id + name + type + path — instead of serializing everything.
  *
- * Matching is token-AND, case-insensitive: a node matches when its lowercased
- * name contains EVERY whitespace-separated word of the query, in any order.
- * "table style" therefore hits "Table Style", "Style - Table", "TableStyle
- * (large)" — forgiving of casing, word order, and surrounding text, which is
- * what a human-supplied description needs.
+ * Matching is exact (case-insensitive) against the whole name: "Frame 1"
+ * matches a node literally named "Frame 1", never "Frame 15" or "Frame
+ * 3465341" just because they share a substring. A token/substring match
+ * would over-match badly in a large file — most layer names share common
+ * words or digits — turning a lookup meant to disambiguate into one that
+ * multiplies the ambiguity instead.
  *
  * A match is never searched inside for more matches: the outermost matching
  * node's subtree already contains any nested hits, so stopping there collapses
- * "Table Style" (the frame) + its three inner "Table style" text labels down
- * to the one container the caller almost certainly meant. This is what makes
- * the common case resolve to a single, auto-focusable match.
+ * a match and any inner descendants sharing its exact name down to the one
+ * container the caller almost certainly meant.
  */
 export function searchDesignByName(design: SimplifiedDesign, query: string): NameSearchMatch[] {
-  const tokens = query.toLowerCase().split(/\s+/).filter(Boolean);
-  if (tokens.length === 0) return [];
+  const target = query.trim().toLowerCase();
+  if (!target) return [];
 
   const matches: NameSearchMatch[] = [];
   const visit = (nodes: SimplifiedNode[], ancestors: string[]): void => {
     for (const node of nodes) {
-      const nameLower = node.name.toLowerCase();
-      if (tokens.every((t) => nameLower.includes(t))) {
+      if (node.name.toLowerCase() === target) {
         matches.push({
           id: node.id,
           name: node.name,

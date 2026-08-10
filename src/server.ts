@@ -70,6 +70,7 @@ export async function startServer(config: ServerConfig): Promise<void> {
     skipImageDownloads: config.skipImageDownloads,
     imageDir: config.imageDir,
     colorTokensDir: config.colorTokensDir,
+    pruneRejectedIcons: config.pruneRejectedIcons,
   };
 
   if (config.isStdioMode) {

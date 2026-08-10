@@ -10,12 +10,7 @@ const parameters = {
     .string()
     .regex(/^[A-Za-z0-9_]+$/, "Asset name must be letters, numbers, or underscores")
     .describe(
-      "The Xcode color asset name, e.g. 'primaryGreenColor' (creates <assetName>.colorset)",
-    ),
-  assetCatalogPath: z
-    .string()
-    .describe(
-      "Path to the target .xcassets directory (absolute, or relative to the server cwd), e.g. 'ZSheet/Assets.xcassets'. Must already exist.",
+      "The Xcode color asset name, e.g. 'primaryGreenColor' (becomes <assetName>.colorset)",
     ),
   hex: z
     .string()
@@ -33,19 +28,7 @@ const parameters = {
     .string()
     .regex(/^[A-Za-z0-9_/]+$/, "Group must be letters, numbers, underscores, or slashes")
     .optional()
-    .describe("Optional subfolder inside the catalog, e.g. 'ColorSet'"),
-  reuse: z
-    .boolean()
-    .optional()
-    .default(true)
-    .describe(
-      "Return an existing colorset whose color matches instead of creating a duplicate. Default true.",
-    ),
-  overwrite: z
-    .boolean()
-    .optional()
-    .default(false)
-    .describe("Replace the colorset if it already exists. Default false."),
+    .describe("Optional subfolder inside the catalog, e.g. 'ColorSet' (becomes a path prefix)"),
 };
 
 const parametersSchema = z.object(parameters);
@@ -54,16 +37,23 @@ export type WriteColorsetToolParams = z.infer<typeof parametersSchema>;
 async function handler(params: WriteColorsetToolParams, _extra: ToolExtra) {
   try {
     const result = writeColorset(parametersSchema.parse(params));
+    if (result.status === "error") {
+      return { isError: true, content: [{ type: "text" as const, text: result.message }] };
+    }
+    // Two content items: the machine-readable payload (for native/apply-figma-asset.sh
+    // or the agent's own file writes) and a short human-readable status line.
     return {
-      isError: result.status === "error",
-      content: [{ type: "text" as const, text: result.message }],
+      content: [
+        { type: "text" as const, text: result.payload },
+        { type: "text" as const, text: result.message },
+      ],
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    Logger.error(`Error writing colorset ${params.assetName}:`, message);
+    Logger.error(`Error preparing colorset ${params.assetName}:`, message);
     return {
       isError: true,
-      content: [{ type: "text" as const, text: `Failed to write colorset: ${message}` }],
+      content: [{ type: "text" as const, text: `Failed to prepare colorset: ${message}` }],
     };
   }
 }
@@ -71,7 +61,7 @@ async function handler(params: WriteColorsetToolParams, _extra: ToolExtra) {
 export const writeColorsetTool = {
   name: "write_colorset",
   description:
-    "Map a Figma fill color to an Xcode .colorset in an existing asset catalog, using the repo's exact srgb hex-byte format. Reuses an existing colorset whose universal color matches (to avoid duplicates) unless reuse is false. Skips if the named colorset already exists unless overwrite is set.",
+    "Format a Figma fill color as an Xcode .colorset (the repo's exact srgb hex-byte format) and RETURN it for you to write into your own asset catalog — this server does not write to disk (it may be hosted remotely). The result is a JSON payload of files to create; save it and run native/apply-figma-asset.sh <your .xcassets dir> <payload.json>, or write the file yourself. Check your catalog for an existing colorset with the same color and reuse it instead of duplicating.",
   parametersSchema,
   handler,
 } as const;

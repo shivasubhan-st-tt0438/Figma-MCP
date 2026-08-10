@@ -5,7 +5,7 @@ import {
   allExtractors,
   collapseSvgContainers,
 } from "~/extractors/index.js";
-import { writeLogs } from "~/utils/logger.js";
+import { writeLogs, debugSlug } from "~/utils/logger.js";
 import { serializeResult, type OutputFormat } from "~/utils/serialize.js";
 import { wrapForSerialization } from "~/utils/serializable-design.js";
 import { tagError } from "~/utils/error-meta.js";
@@ -31,8 +31,13 @@ import {
   annotateSfSymbols,
   addConsumptionGuide,
 } from "~/services/enrich-design.js";
-import { downloadIcons } from "~/services/download-icons.js";
+import { collectIconAssets } from "~/services/download-icons.js";
 import type { SimplifiedDesign } from "~/extractors/types.js";
+import {
+  applyNote,
+  buildReturnedAssetPayload,
+  type ReturnedAssetFile,
+} from "~/utils/returned-asset.js";
 
 export type { GetFigmaDataMetrics } from "~/services/get-figma-data-metrics.js";
 
@@ -41,9 +46,9 @@ export type GetFigmaDataInput = {
   nodeId?: string;
   depth?: number;
   /**
-   * Auto-download every icon (IMAGE-SVG node) in the fetched tree as a vector
-   * PDF into hooks.imageDir, and stamp iconFile on each one — see
-   * download-icons.ts. Requires hooks.imageDir; silently skipped without it.
+   * Auto-download every icon (IMAGE-SVG node) in the fetched tree as a
+   * base64-encoded vector PDF, and stamp iconFile on each one — see
+   * download-icons.ts.
    */
   downloadIcons?: boolean;
   /**
@@ -57,11 +62,13 @@ export type GetFigmaDataInput = {
    */
   focusNodeId?: string;
   /**
-   * Discovery: find a node by (partial) NAME without knowing its id. Searches
-   * the tree token-AND case-insensitively (see searchDesignByName). Exactly
-   * one match auto-focuses to it (same as passing its id as focusNodeId);
-   * zero or many matches return a compact candidate listing to pick a
-   * focusNodeId from — never the full tree. Takes precedence over focusNodeId.
+   * Discovery: find a node by exact NAME (case-insensitive) without knowing
+   * its id (see searchDesignByName). Exactly one match auto-focuses to it
+   * (same as passing its id as focusNodeId); zero or many matches return a
+   * compact candidate listing to pick a focusNodeId from — never the full
+   * tree, and never any enrichment API call (see getFigmaData) — an
+   * ambiguous/missing name costs one raw fetch, nothing more. Takes
+   * precedence over focusNodeId.
    */
   find?: string;
 };
@@ -69,7 +76,27 @@ export type GetFigmaDataInput = {
 export type GetFigmaDataResult = {
   formatted: string;
   metrics: GetFigmaDataMetrics;
+  /**
+   * Present only when `downloadIcons` collected icons: a second, self-contained
+   * write-files payload (name + catalog-relative path + base64 per icon PDF)
+   * the client applies with native/apply-figma-asset.sh. Kept OUT of `formatted`
+   * so the design tree the model reads stays lean — the base64 rides in its own
+   * response content item. See collectIconAssets.
+   */
+  iconsPayload?: string;
 };
+
+/** Wrap collected icon files into the payload the client/apply-script consumes. */
+function buildIconsPayload(iconAssets: ReturnedAssetFile[]): string {
+  return buildReturnedAssetPayload(
+    "icons",
+    iconAssets,
+    applyNote(
+      "Pre-fetched icon PDFs (base64), one per node carrying a matching iconFile above. " +
+        "Decode each to binary; use them to build imagesets or reference directly — no per-icon re-fetch needed.",
+    ),
+  );
+}
 
 export type GetFigmaDataOutcome = {
   input: GetFigmaDataInput;
@@ -107,8 +134,15 @@ export type GetFigmaDataHooks = {
    * names before falling back to the live Variables API. See resolveVariableFillNames.
    */
   colorTokensDir?: string;
-  /** Base directory for icon PDFs when input.downloadIcons is set. See download-icons.ts. */
-  imageDir?: string;
+  /**
+   * When collectIconAssets rejects a node (too small, or native-control
+   * decomposition), prune it from the tree instead of leaving it as a plain
+   * unstamped node. Default false — a rejected node is still real layout
+   * information (e.g. a divider), so keeping it is the safer default; set
+   * true to reclaim the token cost of icon-shaped nodes that never make it
+   * into the icons payload anyway.
+   */
+  pruneRejectedIcons?: boolean;
 };
 
 /**
@@ -134,6 +168,9 @@ export async function getFigmaData(
   // response is a compact candidate listing instead of the serialized design —
   // held here so the serialize step emits it in place of the full tree.
   let findListing: string | undefined;
+  // Icons collected as base64 when downloadIcons is set — returned as a second
+  // payload alongside the design (see GetFigmaDataResult.iconsPayload).
+  let iconAssets: ReturnedAssetFile[] = [];
   // Per-call counter shared with the walker. Lives in the call closure so
   // overlapping HTTP requests each have their own — no module-global state.
   const nodeCounter = { count: 0 };
@@ -157,6 +194,13 @@ export async function getFigmaData(
     const rawApiResponse = rawResult.data;
     const rawSizeKb = rawResult.rawSize / 1024;
 
+    // Dump the raw files-API response HERE (the one primary fetch) rather than
+    // inside FigmaService.getRawNode/getRawFile — those also run for enrichment
+    // sub-calls (component-set defs, etc.), which would produce extra raw JSONs
+    // per request. One user fetch → one raw JSON.
+    const debugId = debugSlug(fileKey, nodeId);
+    writeLogs(`figma-raw-${debugId}.json`, rawApiResponse);
+
     await hooks.onSimplifyStart?.({ getNodeCount: () => nodeCounter.count });
     let simplifiedDesign;
     const simplifyStart = Date.now();
@@ -166,42 +210,19 @@ export async function getFigmaData(
         afterChildren: collapseSvgContainers,
         nodeCounter,
       });
-      // Best-effort: replace auto-generated fill_XXXXXX names with the real Figma
-      // Variable name wherever a bound variable can be resolved. Tries local DTCG
-      // color token files first (free, unambiguous ID match, with a hex+alpha
-      // fallback), then the live Variables API for anything still unresolved.
-      // Silently falls back to the synthetic name (today's behavior) if neither
-      // source can resolve a given variable.
-      const localTokens = loadColorTokensDir(hooks.colorTokensDir);
-      const appkitHints = loadAppkitColorHints(hooks.colorTokensDir);
-      simplifiedDesign = await resolveVariableFillNames(
-        simplifiedDesign,
-        figmaService,
-        fileKey,
-        localTokens,
-        appkitHints,
-      );
 
-      // Enrichment passes: structured variant state, component-set property
-      // definitions (one extra batched /nodes call), component source
-      // libraries (native vs. custom, resolved via the published-components
-      // API), Dev Mode resource links (one /dev_resources call), and SF
-      // Symbol names for private-use glyphs. All best-effort.
-      parseVariantProperties(simplifiedDesign);
-      await enrichComponentSetDefinitions(simplifiedDesign, figmaService, fileKey);
-      await resolveComponentLibraries(simplifiedDesign, figmaService);
-      await attachDevResources(simplifiedDesign, figmaService, fileKey);
-      // Runs AFTER dev-resources attachment, not before: a .swift link
-      // pinned on an exact node that turns out to be purely decorative
-      // must still resolve before that node is potentially pruned away.
-      pruneNativeDecoration(simplifiedDesign);
-      annotateSfSymbols(simplifiedDesign);
-      // Resolve `find`/`focusNodeId` BEFORE downloading icons, so a scoped
-      // fetch only downloads its subtree's icons — not the whole instance's.
-      // `find` is discovery: one match auto-focuses; zero/many produce a
-      // candidate listing (findListing) instead of the full tree. A
-      // focusNodeId miss falls back to the same listing rather than dumping
-      // everything — the very thing the caller was trying to narrow down.
+      // Resolve `find`/`focusNodeId` BEFORE any enrichment API call — matching
+      // is name/id lookup over the tree extractors already built, so it needs
+      // no enrichment to run. `find` is discovery: one match auto-focuses;
+      // zero or many produce a candidate listing (findListing) instead of the
+      // full tree. A focusNodeId miss falls back to the same listing rather
+      // than dumping everything — the very thing the caller was trying to
+      // narrow down. Doing this first means an ambiguous/missing name costs
+      // exactly one raw fetch and nothing else: no variable/library/dev-resource
+      // API calls are spent enriching a tree the caller can't even see yet
+      // (see the `if (!findListing)` gate below) — this also keeps every
+      // enrichment pass that DOES run scoped to the focused subtree, not the
+      // whole file, when focus succeeds.
       if (find) {
         const matches = searchDesignByName(simplifiedDesign, find);
         if (matches.length === 1) {
@@ -218,12 +239,54 @@ export async function getFigmaData(
           );
         }
       }
-      // A candidate listing is a directory of ids, not design data — skip icon
-      // download and the consumption guide, which only make sense for a real
-      // (whole or focused) design tree.
+
+      // A candidate listing is a directory of ids, not design data — every
+      // enrichment pass below makes at least one Figma API call, so none of
+      // them run against a tree the caller can't consume yet. Rate limits are
+      // shared with the eventual disambiguated re-fetch; spending them here
+      // would only make that next call more likely to get throttled.
       if (!findListing) {
-        if (shouldDownloadIcons && hooks.imageDir) {
-          await downloadIcons(simplifiedDesign, figmaService, fileKey, hooks.imageDir);
+        // Best-effort: replace auto-generated fill_XXXXXX names with the real
+        // Figma Variable name wherever a bound variable can be resolved. Tries
+        // local DTCG color token files first (free, unambiguous ID match, with
+        // a hex+alpha fallback), then the live Variables API for anything
+        // still unresolved. Silently falls back to the synthetic name (today's
+        // behavior) if neither source can resolve a given variable.
+        const localTokens = loadColorTokensDir(hooks.colorTokensDir);
+        const appkitHints = loadAppkitColorHints(hooks.colorTokensDir);
+        simplifiedDesign = await resolveVariableFillNames(
+          simplifiedDesign,
+          figmaService,
+          fileKey,
+          localTokens,
+          appkitHints,
+        );
+
+        // Structured variant state, component-set property definitions (one
+        // extra batched /nodes call), component source libraries (native vs.
+        // custom, resolved via the published-components API), Dev Mode
+        // resource links (one /dev_resources call), and SF Symbol names for
+        // private-use glyphs. All best-effort, and — since focus already ran
+        // above — scoped to whatever subtree survived it.
+        parseVariantProperties(simplifiedDesign);
+        await enrichComponentSetDefinitions(simplifiedDesign, figmaService, fileKey);
+        await resolveComponentLibraries(simplifiedDesign, figmaService);
+        await attachDevResources(simplifiedDesign, figmaService, fileKey);
+        // Runs AFTER dev-resources attachment, not before: a .swift link
+        // pinned on an exact node that turns out to be purely decorative
+        // must still resolve before that node is potentially pruned away.
+        pruneNativeDecoration(simplifiedDesign);
+        annotateSfSymbols(simplifiedDesign);
+
+        // Icons come back as base64 in the response, not written to a server
+        // directory, so a remote client gets them with no config needed.
+        if (shouldDownloadIcons) {
+          iconAssets = await collectIconAssets(
+            simplifiedDesign,
+            figmaService,
+            fileKey,
+            hooks.pruneRejectedIcons ?? false,
+          );
         }
         addConsumptionGuide(simplifiedDesign, outputFormat);
       }
@@ -233,8 +296,6 @@ export async function getFigmaData(
       await hooks.onSimplifyComplete?.();
     }
     const simplifyMs = Date.now() - simplifyStart;
-
-    writeLogs("figma-simplified.json", simplifiedDesign);
 
     const rawNodeCount = nodeCounter.count;
     const hasVariables = detectVariables(rawApiResponse);
@@ -253,6 +314,13 @@ export async function getFigmaData(
     const simplifiedSizeKb = Buffer.byteLength(formatted, "utf8") / 1024;
     const serializeMs = Date.now() - serializeStart;
 
+    const finalExt = outputFormat.includes("json")
+      ? "json"
+      : outputFormat === "tree"
+        ? "txt"
+        : "yaml";
+    writeLogs(`figma-final-${debugId}.${finalExt}`, formatted);
+
     metrics = {
       rawSizeKb,
       simplifiedSizeKb,
@@ -270,7 +338,11 @@ export async function getFigmaData(
       simplifyMs,
       serializeMs,
     };
-    return { formatted, metrics };
+    return {
+      formatted,
+      metrics,
+      ...(iconAssets.length > 0 && { iconsPayload: buildIconsPayload(iconAssets) }),
+    };
   } catch (error) {
     caughtError = error;
     throw error;
@@ -303,6 +375,7 @@ type TargetProcessingResult = {
   hasVariables: boolean;
   fetchMs: number;
   simplifyMs: number;
+  iconAssets: ReturnedAssetFile[];
 };
 
 /**
@@ -316,7 +389,7 @@ type TargetProcessingResult = {
 async function fetchAndEnrichTarget(
   figmaService: FigmaService,
   target: GetFigmaDataInput,
-  hooks: Pick<GetFigmaDataHooks, "colorTokensDir" | "imageDir">,
+  hooks: Pick<GetFigmaDataHooks, "colorTokensDir" | "pruneRejectedIcons">,
 ): Promise<TargetProcessingResult> {
   const { fileKey, nodeId, depth, downloadIcons: shouldDownloadIcons, focusNodeId } = target;
   const nodeCounter = { count: 0 };
@@ -333,6 +406,10 @@ async function fetchAndEnrichTarget(
   const fetchMs = Date.now() - fetchStart;
   const rawApiResponse = rawResult.data;
   const rawSizeKb = rawResult.rawSize / 1024;
+
+  // Primary-fetch raw dump only (see the single-target path for why it lives
+  // here, not in FigmaService) — one raw JSON per target.
+  writeLogs(`figma-raw-${debugSlug(fileKey, nodeId)}.json`, rawApiResponse);
 
   const simplifyStart = Date.now();
   let simplifiedDesign = await simplifyRawFigmaObject(rawApiResponse, allExtractors, {
@@ -368,9 +445,16 @@ async function fetchAndEnrichTarget(
   if (focusNodeId) {
     focusDesignSubtree(simplifiedDesign, focusNodeId);
   }
-  if (shouldDownloadIcons && hooks.imageDir) {
-    await downloadIcons(simplifiedDesign, figmaService, fileKey, hooks.imageDir);
-  }
+  // Icons come back as base64 in the response, not written to disk (see
+  // collectIconAssets).
+  const iconAssets = shouldDownloadIcons
+    ? await collectIconAssets(
+        simplifiedDesign,
+        figmaService,
+        fileKey,
+        hooks.pruneRejectedIcons ?? false,
+      )
+    : [];
   const simplifyMs = Date.now() - simplifyStart;
 
   return {
@@ -383,6 +467,7 @@ async function fetchAndEnrichTarget(
     hasVariables: detectVariables(rawApiResponse),
     fetchMs,
     simplifyMs,
+    iconAssets,
   };
 }
 
@@ -391,6 +476,8 @@ export type GetFigmaDataBatchEntryResult = {
   nodeId?: string;
   formatted?: string;
   metrics?: GetFigmaDataMetrics;
+  /** Per-target icon base64 payload (see GetFigmaDataResult.iconsPayload), when downloadIcons collected any. */
+  iconsPayload?: string;
   /** Set instead of formatted/metrics when this one target's fetch failed — isolated, never breaks the rest of the batch. */
   error?: string;
 };
@@ -401,7 +488,7 @@ export type GetFigmaDataBatchResult = {
 
 export type GetFigmaDataBatchHooks = Pick<
   GetFigmaDataHooks,
-  "colorTokensDir" | "imageDir" | "onFetchStart" | "onSerializeStart"
+  "colorTokensDir" | "pruneRejectedIcons" | "onFetchStart" | "onSerializeStart"
 >;
 
 /**
@@ -479,6 +566,13 @@ export async function getFigmaDataBatch(
     const serializeStart = Date.now();
     const formatted = serializeResult(wrapForSerialization(p.design), outputFormat);
     const serializeMs = Date.now() - serializeStart;
+
+    const finalExt = outputFormat.includes("json")
+      ? "json"
+      : outputFormat === "tree"
+        ? "txt"
+        : "yaml";
+    writeLogs(`figma-final-${debugSlug(p.fileKey, p.nodeId)}.${finalExt}`, formatted);
     const simplifiedSizeKb = Buffer.byteLength(formatted, "utf8") / 1024;
     const measured = measureSimplifiedDesign(p.design);
 
@@ -500,7 +594,13 @@ export async function getFigmaDataBatch(
       serializeMs,
     };
 
-    return { fileKey: p.fileKey, nodeId: p.nodeId, formatted, metrics };
+    return {
+      fileKey: p.fileKey,
+      nodeId: p.nodeId,
+      formatted,
+      metrics,
+      ...(p.iconAssets.length > 0 && { iconsPayload: buildIconsPayload(p.iconAssets) }),
+    };
   });
 
   return { entries };

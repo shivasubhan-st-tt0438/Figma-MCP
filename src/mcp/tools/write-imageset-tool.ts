@@ -19,22 +19,14 @@ const parameters = {
   assetName: z
     .string()
     .regex(/^[A-Za-z0-9_]+$/, "Asset name must be letters, numbers, or underscores (no extension)")
-    .describe("The Xcode asset name, e.g. 'ZWorkdriveLogo' (creates <assetName>.imageset)"),
-  assetCatalogPath: z
-    .string()
-    .describe(
-      "Path to the target .xcassets directory (absolute, or relative to the server cwd), e.g. 'ZSheet/Assets.xcassets'. Must already exist.",
-    ),
+    .describe("The Xcode asset name, e.g. 'ZWorkdriveLogo' (becomes <assetName>.imageset)"),
   group: z
     .string()
     .regex(/^[A-Za-z0-9_/]+$/, "Group must be letters, numbers, underscores, or slashes")
     .optional()
-    .describe("Optional subfolder inside the catalog, e.g. 'DataConnection'"),
-  overwrite: z
-    .boolean()
-    .optional()
-    .default(false)
-    .describe("Replace the imageset if it already exists. Defaults to false (skip if present)."),
+    .describe(
+      "Optional subfolder inside the catalog, e.g. 'DataConnection' (becomes a path prefix)",
+    ),
 };
 
 const parametersSchema = z.object(parameters);
@@ -47,16 +39,23 @@ async function handler(
 ) {
   try {
     const result = await writeImageset(figmaService, parametersSchema.parse(params));
+    if (result.status === "error") {
+      return { isError: true, content: [{ type: "text" as const, text: result.message }] };
+    }
+    // Two content items: the machine-readable payload (for native/apply-figma-asset.sh
+    // or the agent's own file writes) and a short human-readable status line.
     return {
-      isError: result.status === "error",
-      content: [{ type: "text" as const, text: result.message }],
+      content: [
+        { type: "text" as const, text: result.payload },
+        { type: "text" as const, text: result.message },
+      ],
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    Logger.error(`Error writing imageset for ${params.nodeId}:`, message);
+    Logger.error(`Error preparing imageset for ${params.nodeId}:`, message);
     return {
       isError: true,
-      content: [{ type: "text" as const, text: `Failed to write imageset: ${message}` }],
+      content: [{ type: "text" as const, text: `Failed to prepare imageset: ${message}` }],
     };
   }
 }
@@ -64,7 +63,7 @@ async function handler(
 export const writeImagesetTool = {
   name: "write_imageset",
   description:
-    "Export a Figma icon node as a vector PDF (native Figma export) and write it as an Xcode .imageset into an existing asset catalog, with a standard single-scale Contents.json. Skips if the imageset already exists unless overwrite is set.",
+    "Export a Figma icon node as a vector PDF (native Figma export) and RETURN it, base64-encoded, as an Xcode .imageset for you to write into your own asset catalog — this server does not write to disk (it may be hosted remotely). The result is a JSON payload of files to create; save it and run native/apply-figma-asset.sh <your .xcassets dir> <payload.json> (it decodes the base64 PDF), or write the files yourself (decode the base64 entry to binary — never save the base64 text as-is).",
   parametersSchema,
   handler,
 } as const;

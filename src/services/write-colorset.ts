@@ -1,10 +1,11 @@
-import fs from "fs";
-import path from "path";
-import { Logger } from "~/utils/logger.js";
+import {
+  applyNote,
+  buildReturnedAssetPayload,
+  type ReturnedAssetFile,
+} from "~/utils/returned-asset.js";
 
 export type WriteColorsetParams = {
   assetName: string;
-  assetCatalogPath: string;
   /** Light/universal color as hex: "#089949", "089949", or "#089949FF". */
   hex: string;
   /** Optional alpha 0..1 (overrides any alpha encoded in hex). Default 1. */
@@ -12,36 +13,15 @@ export type WriteColorsetParams = {
   /** Optional dark-appearance color as hex. */
   darkHex?: string;
   darkAlpha?: number;
+  /** Optional subfolder inside the catalog, becomes a path prefix. */
   group?: string;
-  /** Return an existing matching colorset instead of creating one. Default true. */
-  reuse?: boolean;
-  overwrite?: boolean;
 };
 
-export type WriteColorsetResult = {
-  status: "written" | "reused" | "skipped-exists" | "error";
-  name?: string;
-  colorsetDir?: string;
-  message: string;
-};
+export type WriteColorsetResult =
+  | { status: "error"; message: string }
+  | { status: "content"; payload: string; message: string };
 
 type Rgba = { r: number; g: number; b: number; a: number };
-
-/** Shape of an entry in an Xcode colorset's Contents.json "colors" array. Component
- * values are read via componentToByte, which accepts 0xNN hex, 0..1 float, or 0..255
- * int forms — whichever form the file (ours or a hand-authored one) happens to use. */
-type XcodeColorEntry = {
-  appearances?: Array<{ appearance: string; value: string }>;
-  color?: {
-    "color-space"?: string;
-    components?: {
-      red?: string | number;
-      green?: string | number;
-      blue?: string | number;
-      alpha?: string | number;
-    };
-  };
-};
 
 function parseHex(hex: string, alphaOverride?: number): Rgba {
   let h = hex.trim().replace(/^#/, "");
@@ -62,15 +42,6 @@ function parseHex(hex: string, alphaOverride?: number): Rgba {
   const g = parseInt(h.slice(2, 4), 16);
   const b = parseInt(h.slice(4, 6), 16);
   return { r, g, b, a: alphaOverride ?? a };
-}
-
-/** Parse a single Xcode color component (0xNN | 0..1 float | 0..255 int) to a 0..255 int. */
-function componentToByte(v: string): number {
-  const s = v.trim();
-  if (s.startsWith("0x") || s.startsWith("0X")) return parseInt(s, 16);
-  if (s.includes(".")) return Math.round(parseFloat(s) * 255);
-  const n = parseInt(s, 10);
-  return n; // already 0..255
 }
 
 function byteHex(n: number): string {
@@ -99,77 +70,18 @@ function buildContentsJson(light: Rgba, dark?: Rgba): string {
   return JSON.stringify({ colors, info: { author: "xcode", version: 1 } }, null, 2) + "\n";
 }
 
-/** Read the universal (non-dark) color of a colorset, if parseable. */
-function readUniversalColor(contentsPath: string): Rgba | undefined {
-  try {
-    const json = JSON.parse(fs.readFileSync(contentsPath, "utf8")) as {
-      colors?: XcodeColorEntry[];
-    };
-    const colors: XcodeColorEntry[] = json.colors ?? [];
-    const universal = colors.find((c) => !c.appearances) ?? colors[0];
-    const comp = universal?.color?.components;
-    if (!comp) return undefined;
-    return {
-      r: componentToByte(String(comp.red)),
-      g: componentToByte(String(comp.green)),
-      b: componentToByte(String(comp.blue)),
-      a: parseFloat(String(comp.alpha ?? "1")),
-    };
-  } catch {
-    return undefined;
-  }
-}
-
-function colorsMatch(a: Rgba, b: Rgba): boolean {
-  return a.r === b.r && a.g === b.g && a.b === b.b && Math.abs(a.a - b.a) < 0.005;
-}
-
-function findExistingColorset(catalogDir: string, target: Rgba): string | undefined {
-  const stack = [catalogDir];
-  while (stack.length) {
-    const dir = stack.pop()!;
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-      const full = path.join(dir, entry.name);
-      if (!entry.isDirectory()) continue;
-      if (entry.name.endsWith(".colorset")) {
-        const c = readUniversalColor(path.join(full, "Contents.json"));
-        if (c && colorsMatch(c, target)) return entry.name.replace(/\.colorset$/, "");
-      } else {
-        stack.push(full);
-      }
-    }
-  }
-  return undefined;
-}
-
 /**
- * Map a Figma fill to an Xcode `.colorset`. Reuses an existing colorset whose
- * universal color matches (so we don't duplicate `primaryGreenColor` etc.),
- * otherwise creates a new one in the repo's exact srgb hex-byte format.
+ * Format a Figma fill as an Xcode `.colorset` in the repo's exact srgb hex-byte
+ * form, and return it for the client to write. Pure (no IO): the caller's
+ * catalog lives on the client, so this only produces the Contents.json — see
+ * returned-asset.ts for why the write moved client-side.
+ *
+ * The old server-side "reuse an existing matching colorset" scan is gone with
+ * the write: the server can't see the client's catalog to dedupe. That's now
+ * the client's job (see the returned note).
  */
 export function writeColorset(params: WriteColorsetParams): WriteColorsetResult {
-  const {
-    assetName,
-    assetCatalogPath,
-    hex,
-    alpha,
-    darkHex,
-    darkAlpha,
-    group,
-    reuse = true,
-    overwrite = false,
-  } = params;
-
-  const catalogDir = path.resolve(assetCatalogPath);
-  if (!catalogDir.endsWith(".xcassets")) {
-    return {
-      status: "error",
-      message: `assetCatalogPath must point to a .xcassets directory: ${catalogDir}`,
-    };
-  }
-  if (!fs.existsSync(catalogDir) || !fs.statSync(catalogDir).isDirectory()) {
-    return { status: "error", message: `Asset catalog does not exist: ${catalogDir}` };
-  }
+  const { assetName, hex, alpha, darkHex, darkAlpha, group } = params;
 
   let light: Rgba;
   try {
@@ -179,43 +91,20 @@ export function writeColorset(params: WriteColorsetParams): WriteColorsetResult 
   }
   const dark = darkHex ? parseHex(darkHex, darkAlpha) : undefined;
 
-  if (reuse && !dark) {
-    const existing = findExistingColorset(catalogDir, light);
-    if (existing) {
-      return {
-        status: "reused",
-        name: existing,
-        message: `Reused existing colorset '${existing}' matching ${hex}`,
-      };
-    }
-  }
+  const folder = `${assetName}.colorset`;
+  const rel = group ? `${group}/${folder}` : folder;
+  const files: ReturnedAssetFile[] = [
+    { path: `${rel}/Contents.json`, encoding: "utf8", content: buildContentsJson(light, dark) },
+  ];
 
-  const groupDir = group ? path.join(catalogDir, group) : catalogDir;
-  const colorsetDir = path.join(groupDir, `${assetName}.colorset`);
-  if (!path.resolve(colorsetDir).startsWith(catalogDir + path.sep)) {
-    return {
-      status: "error",
-      message: `Resolved colorset path escapes the catalog: ${colorsetDir}`,
-    };
-  }
+  const note = applyNote(
+    `Xcode srgb hex-byte color format for ${hex}${dark ? ` (+ dark ${darkHex})` : ""} is already applied. ` +
+      `Before adding, check whether a colorset with an identical color already exists in your catalog and reuse it instead of duplicating.`,
+  );
 
-  if (fs.existsSync(colorsetDir) && !overwrite) {
-    return {
-      status: "skipped-exists",
-      name: assetName,
-      colorsetDir,
-      message: `Colorset already exists (pass overwrite to replace): ${colorsetDir}`,
-    };
-  }
-
-  fs.mkdirSync(colorsetDir, { recursive: true });
-  fs.writeFileSync(path.join(colorsetDir, "Contents.json"), buildContentsJson(light, dark), "utf8");
-
-  Logger.log(`Wrote colorset ${assetName} → ${colorsetDir}`);
   return {
-    status: "written",
-    name: assetName,
-    colorsetDir,
-    message: `Wrote ${assetName}.colorset (${hex}) to ${colorsetDir}`,
+    status: "content",
+    payload: buildReturnedAssetPayload(rel, files, note),
+    message: `Prepared ${folder} — write it into your .xcassets catalog (see payload).`,
   };
 }

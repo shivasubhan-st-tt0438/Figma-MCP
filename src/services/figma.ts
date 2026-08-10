@@ -13,7 +13,7 @@ import type {
   Transform,
 } from "@figma/rest-api-spec";
 import { downloadAndProcessImage, type ImageProcessingResult } from "~/utils/image-processing.js";
-import { Logger, writeLogs } from "~/utils/logger.js";
+import { Logger } from "~/utils/logger.js";
 import { fetchJSON } from "~/utils/fetch-json.js";
 import { getErrorMeta } from "~/utils/error-meta.js";
 import { buildForbiddenMessage, buildRateLimitMessage } from "./errors/index.js";
@@ -326,10 +326,7 @@ export class FigmaService {
     const endpoint = `/files/${fileKey}${depth ? `?depth=${depth}` : ""}`;
     Logger.log(`Retrieving raw Figma file: ${fileKey} (depth: ${depth ?? "default"})`);
 
-    const result = await this.requestWithSize<GetFileResponse>(endpoint);
-    writeLogs("figma-raw.json", result.data);
-
-    return result;
+    return await this.requestWithSize<GetFileResponse>(endpoint);
   }
 
   /**
@@ -348,10 +345,7 @@ export class FigmaService {
       `Retrieving raw Figma node: ${nodeId} from ${fileKey} (depth: ${depth ?? "default"})`,
     );
 
-    const result = await this.requestWithSize<GetFileNodesResponse>(endpoint);
-    writeLogs("figma-raw.json", result.data);
-
-    return result;
+    return await this.requestWithSize<GetFileNodesResponse>(endpoint);
   }
 
   /**

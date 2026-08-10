@@ -209,15 +209,22 @@ describe("searchDesignByName", () => {
     };
   }
 
-  it("matches token-AND, case-insensitively, in any word order", () => {
+  it("matches the exact name, case-insensitively, and nothing else", () => {
     const design = makeSearchDesign();
 
     const matches = searchDesignByName(design, "table style");
 
-    // "Table Style" and "Style Table (large)" both contain both words;
-    // "Sidebar" does not. The nested "Table style" TEXT nodes are collapsed
-    // into their matching ancestor.
-    expect(matches.map((m) => m.id).sort()).toEqual(["1:2", "1:6"]);
+    // Only "Table Style" is an exact (case-insensitive) match. "Style Table
+    // (large)" shares both words but isn't the same name, so it's excluded —
+    // a substring/token match would wrongly include it.
+    expect(matches.map((m) => m.id)).toEqual(["1:2"]);
+  });
+
+  it("does not match on partial word overlap or reordering", () => {
+    const design = makeSearchDesign();
+
+    expect(searchDesignByName(design, "style table")).toEqual([]);
+    expect(searchDesignByName(design, "table")).toEqual([]);
   });
 
   it("does not descend into a match (nested same-name hits are collapsed)", () => {
@@ -239,13 +246,6 @@ describe("searchDesignByName", () => {
     expect(matches).toHaveLength(1);
     expect(matches[0].path).toBe("Root > Sidebar");
     expect(matches[0].type).toBe("FRAME");
-  });
-
-  it("returns nothing when not every token appears", () => {
-    const design = makeSearchDesign();
-
-    // "Sidebar" contains neither "table" nor "style".
-    expect(searchDesignByName(design, "sidebar table")).toEqual([]);
   });
 });
 

@@ -1,6 +1,6 @@
 import type { SimplifiedDesign, SimplifiedNode } from "~/extractors/types.js";
 import type { FigmaService } from "~/services/figma.js";
-import { downloadFigmaImage } from "~/utils/common.js";
+import type { ReturnedAssetFile } from "~/utils/returned-asset.js";
 import { slugify } from "~/utils/slugify.js";
 import { Logger } from "~/utils/logger.js";
 
@@ -10,16 +10,16 @@ import { Logger } from "~/utils/logger.js";
  * same type. isIconSized applies one deliberately simple rule: reject a node
  * whose width OR height is under MIN_ICON_DIMENSION. That drops hairline
  * slivers (1px dividers, stray sub-pixel markers) while keeping every real
- * glyph — most icons in this app are 20x20 or larger.
+ * glyph — most icons in this app are 16x16 or larger.
  *
  * Intentionally NOT a ratio or max-size check. A permissive size floor plus
  * the explicit get_render_urls escape hatch — for the messy, ungrouped cases
  * where the auto-filter can't know the right unit to render — was chosen over
  * an ever-tuned geometric heuristic. The tradeoff, accepted on purpose: a
- * large square-ish background or a >=20px-tall bar still passes here; pull
+ * large square-ish background or a >=16px-tall bar still passes here; pull
  * those out with an explicit render when precision matters.
  */
-const MIN_ICON_DIMENSION = 20;
+const MIN_ICON_DIMENSION = 16;
 
 function isIconSized(box: { width: number; height: number }): boolean {
   const { width, height } = box;
@@ -27,11 +27,17 @@ function isIconSized(box: { width: number; height: number }): boolean {
 }
 
 /**
- * Auto-download every icon node in the fetched tree as a vector PDF — the
- * same native Figma PDF export write_imageset uses — and stamp `iconFile`
- * on each one with the saved filename. Lets a consumer skip a separate
- * download_figma_images round-trip per icon: the fetch itself hands back a
- * ready-to-use local asset alongside the design data.
+ * Collect every icon node in the fetched tree as a vector PDF, base64-encoded,
+ * and return them for the CLIENT to write — stamping `iconFile` (the filename
+ * a node's icon appears under in the returned payload) on each one.
+ *
+ * This used to write the PDFs to the server's --image-dir. That only reaches
+ * the caller when the server shares its filesystem (stdio on the same machine);
+ * hosted over HTTP the files land on the host, useless to a remote client. So
+ * the bytes now ride back in the tool response instead (as a second payload,
+ * see get-figma-data.ts), applied client-side via native/apply-figma-asset.sh.
+ * The bytes travel the already-open MCP connection rather than the client
+ * pulling Figma's short-lived signed URLs itself — proxy-robust, no expiry.
  *
  * Scoped to nodes already classified `IMAGE-SVG` by node-walker.ts (which
  * renames every raw VECTOR node to IMAGE-SVG, and also gives that type to
@@ -39,7 +45,7 @@ function isIconSized(box: { width: number; height: number }): boolean {
  * This is a deliberate proxy for "icon, not image": a full raster photo/logo
  * an icon might be cropped from is an IMAGE-fill FRAME/RECTANGLE, never
  * IMAGE-SVG. But two categories of non-icon IMAGE-SVG node still slip
- * through that type check alone, so two more filters run before download:
+ * through that type check alone, so two more filters run before collecting:
  *
  * 1. Size — a hairline divider or stray sliver can satisfy
  *    collapseSvgContainers' "all children SVG-eligible" rule just as well as
@@ -50,45 +56,59 @@ function isIconSized(box: { width: number; height: number }): boolean {
  *    (e.g. the traffic-light dots inside a native Titlebar), per the "Native
  *    vs Custom Components" consumption rule. The app uses the real control,
  *    never a static picture of its internals, so these are never real
- *    assets worth downloading regardless of shape.
+ *    assets worth collecting regardless of shape.
  *
  * Best-effort like every other enrichment pass: a render-API failure or a
- * single icon's download failure is logged and skipped, never thrown — a
- * broken icon download must not break the fetch itself.
+ * single icon's fetch failure is logged and skipped, never thrown — a broken
+ * icon must not break the fetch itself.
+ *
+ * `pruneRejected` (default false) controls what happens to a rejected
+ * candidate (either reason): pruned from `design` entirely, or left in place
+ * as a plain node with no `iconFile` stamp. Default false because a rejected
+ * node is still real layout information — a sub-floor divider is a real
+ * visible separator, not noise — so dropping it loses signal a consumer might
+ * need. Set true to reclaim the token cost instead, on the assumption that
+ * icon-shaped rejects are noise for that specific consumer. Either way, a
+ * candidate that passes both checks but fails at the actual render/fetch step
+ * below is a runtime hiccup, not a rejection — it always stays in the tree
+ * without an `iconFile` stamp, same as any other best-effort miss.
  */
-export async function downloadIcons(
+export async function collectIconAssets(
   design: SimplifiedDesign,
   figmaService: FigmaService,
   fileKey: string,
-  imageDir: string,
-): Promise<void> {
+  pruneRejected = false,
+): Promise<ReturnedAssetFile[]> {
   const iconNodes: SimplifiedNode[] = [];
   let skippedAsNativeDecomposition = 0;
   let skippedAsTooSmall = 0;
 
-  const visit = (nodes: SimplifiedNode[], insideNative: boolean): void => {
-    for (const node of nodes) {
+  const visit = (nodes: SimplifiedNode[], insideNative: boolean): SimplifiedNode[] =>
+    nodes.filter((node) => {
       const stillInsideNative = insideNative || node.native === true;
       if (node.type === "IMAGE-SVG") {
         if (stillInsideNative) {
           skippedAsNativeDecomposition++;
+          if (pruneRejected) return false;
         } else if (!node.absoluteBoundingBox || !isIconSized(node.absoluteBoundingBox)) {
           skippedAsTooSmall++;
+          if (pruneRejected) return false;
         } else {
           iconNodes.push(node);
         }
       }
-      if (node.children) visit(node.children, stillInsideNative);
-    }
-  };
-  visit(design.nodes, false);
+      if (node.children) node.children = visit(node.children, stillInsideNative);
+      return true;
+    });
+  design.nodes = visit(design.nodes, false);
 
   if (skippedAsNativeDecomposition > 0 || skippedAsTooSmall > 0) {
+    const action = pruneRejected ? "pruned" : "skipped";
     Logger.log(
-      `Icon auto-download: skipped ${skippedAsNativeDecomposition} node(s) inside native-control visual decomposition and ${skippedAsTooSmall} node(s) too small to be icons (under ${MIN_ICON_DIMENSION}px on an axis) — not real icon assets.`,
+      `Icon collection: ${action} ${skippedAsNativeDecomposition} node(s) inside native-control visual decomposition and ${skippedAsTooSmall} node(s) too small to be icons (under ${MIN_ICON_DIMENSION}px on an axis) — not real icon assets.`,
     );
   }
-  if (iconNodes.length === 0) return;
+  if (iconNodes.length === 0) return [];
 
   let urls: Record<string, string>;
   try {
@@ -99,10 +119,11 @@ export async function downloadIcons(
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    Logger.log(`Skipping icon auto-download (${iconNodes.length} icons): ${message}`);
-    return;
+    Logger.log(`Skipping icon collection (${iconNodes.length} icons): ${message}`);
+    return [];
   }
 
+  const files: ReturnedAssetFile[] = [];
   await Promise.all(
     iconNodes.map(async (node) => {
       const url = urls[node.id];
@@ -111,12 +132,23 @@ export async function downloadIcons(
       // generic layer name like "Vector".
       const fileName = `${slugify(node.name) || "icon"}_${node.id.replace(/[:;]/g, "_")}.pdf`;
       try {
-        await downloadFigmaImage(fileName, imageDir, url);
+        const res = await fetch(url);
+        if (!res.ok) {
+          Logger.log(
+            `Failed to fetch icon ${node.id} (${fileName}): ${res.status} ${res.statusText}`,
+          );
+          return;
+        }
+        const base64 = Buffer.from(await res.arrayBuffer()).toString("base64");
+        // push is synchronous — safe under the event loop's single thread even
+        // though these fetches run concurrently. Order doesn't matter here.
+        files.push({ path: fileName, encoding: "base64", content: base64 });
         node.iconFile = fileName;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        Logger.log(`Failed to download icon ${node.id} (${fileName}): ${message}`);
+        Logger.log(`Failed to fetch icon ${node.id} (${fileName}): ${message}`);
       }
     }),
   );
+  return files;
 }

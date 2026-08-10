@@ -62,12 +62,7 @@ export const fetchCommand: Command = command(
       downloadIcons: {
         type: Boolean,
         description:
-          "Auto-download every icon (IMAGE-SVG node) in the fetched tree as a vector PDF into --image-dir, and stamp iconFile on each icon node in the output.",
-      },
-      imageDir: {
-        type: String,
-        description:
-          "Base directory for icon PDFs when --download-icons is set. Defaults to the current working directory.",
+          "Auto-download every icon (IMAGE-SVG node) in the fetched tree as a base64-encoded vector PDF, and stamp iconFile on each icon node in the output.",
       },
       noTelemetry: {
         type: Boolean,
@@ -97,7 +92,6 @@ async function run(
     env?: string;
     colorTokensDir?: string;
     downloadIcons?: boolean;
-    imageDir?: string;
     noTelemetry?: boolean;
   },
   positionals: string[],
@@ -141,7 +135,6 @@ async function run(
     parseOutputFormat(flags.format, "--format") ?? (flags.json ? "native-json" : "native-yaml");
   const colorTokensDirRaw = flags.colorTokensDir ?? envStr("FIGMA_COLOR_TOKENS_DIR");
   const colorTokensDir = colorTokensDirRaw ? resolvePath(colorTokensDirRaw) : undefined;
-  const imageDir = resolvePath(flags.imageDir ?? envStr("IMAGE_DIR") ?? process.cwd());
 
   const result = await getFigmaData(
     new FigmaService(auth),
@@ -151,7 +144,6 @@ async function run(
       onComplete: (outcome) =>
         captureGetFigmaDataCall(outcome, { transport: "cli", authMode: mode }),
       colorTokensDir,
-      imageDir,
     },
   );
   console.log(result.formatted);

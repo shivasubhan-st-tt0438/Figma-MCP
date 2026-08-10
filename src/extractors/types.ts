@@ -204,11 +204,12 @@ export interface SimplifiedNode {
    */
   sfSymbols?: string[];
   /**
-   * Filename of this icon's auto-downloaded vector PDF, relative to the
-   * server's --image-dir. Present only when the fetch was called with
-   * downloadIcons: true (see download-icons.ts) and this node is icon-shaped
-   * (type IMAGE-SVG). Points at a file already saved to disk — no separate
-   * download_figma_images call needed for this icon.
+   * Filename this icon's vector PDF appears under in the response's separate
+   * icons payload (base64). Present only when the fetch was called with
+   * downloadIcons: true (see collectIconAssets) and this node is icon-shaped
+   * (type IMAGE-SVG). The bytes ride back in the tool response — NOT written to
+   * the server's disk — so the client materializes them itself
+   * (native/apply-figma-asset.sh); no separate download call needed per icon.
    */
   iconFile?: string;
   /**

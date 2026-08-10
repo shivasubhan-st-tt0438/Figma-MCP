@@ -82,7 +82,7 @@ const parameters = {
   find: focusNodeIdSchema
     .optional()
     .describe(
-      "OPTIONAL. DISCOVERY: locate a node by a partial/rough NAME when you don't know its id — the right first step when a large node was given but you only want one part of it (e.g. fetch 'the table style component' out of a whole screen). Matches token-AND, case-insensitive: every space-separated word must appear somewhere in a node's name, in any order ('table style' matches 'Table Style', 'Style - Table', etc). If EXACTLY ONE node matches, the result is that node's full focused detail (as if you'd passed its id to focusNodeId) — one call, done. If ZERO or MANY match, the result is a compact candidate listing (id + name + type + path per hit), NOT the full tree — read it, then re-fetch with focusNodeId set to the id you want. Takes precedence over focusNodeId. downloadIcons applies only when a single match auto-focuses.",
+      "OPTIONAL. DISCOVERY: locate a node by its exact NAME when you don't know its id — the right first step when a large node was given but you only want one part of it (e.g. fetch 'Table Style' out of a whole screen). Matches the WHOLE name, case-insensitively, not a substring or partial word — 'Frame 1' only matches a node literally named 'Frame 1', never 'Frame 15' or 'Frame 3465341'. If EXACTLY ONE node matches, the result is that node's full focused detail (as if you'd passed its id to focusNodeId) — one call, done. If ZERO or MANY match, the result is a compact candidate listing (id + name + type + path per hit), NOT the full tree, and NO further Figma API calls are spent — read it, then re-fetch with focusNodeId set to the id you want. Takes precedence over focusNodeId. downloadIcons applies only when a single match auto-focuses.",
     ),
   targets: z
     .array(targetSchema)
@@ -110,7 +110,7 @@ async function getFigmaData(
   clientInfo: ClientInfo | undefined,
   extra: ToolExtra,
   colorTokensDir?: string,
-  imageDir?: string,
+  pruneRejectedIcons?: boolean,
 ) {
   try {
     const parsed = parametersSchema.parse(params);
@@ -134,7 +134,7 @@ async function getFigmaData(
         outputFormat,
         {
           colorTokensDir,
-          imageDir,
+          pruneRejectedIcons,
           onFetchStart: async () => {
             await sendProgress(extra, 0, 2, `Fetching ${targets.length} Figma targets`);
           },
@@ -149,12 +149,22 @@ async function getFigmaData(
       );
 
       return {
-        content: batchResult.entries.map((entry) => {
+        // flatMap: each target emits its design text, then (if any) its own icon
+        // base64 payload as a separate content item — one target's icons stay
+        // adjacent to that target's design.
+        content: batchResult.entries.flatMap((entry) => {
           const header = `# Target: ${entry.fileKey}${entry.nodeId ? `/${entry.nodeId}` : ""}`;
           const text = entry.error
             ? `${header}\nError fetching this target: ${entry.error}`
             : `${header}\n${entry.formatted}`;
-          return { type: "text" as const, text };
+          const items = [{ type: "text" as const, text }];
+          if (entry.iconsPayload) {
+            items.push({
+              type: "text" as const,
+              text: `# Icons for ${entry.fileKey}${entry.nodeId ? `/${entry.nodeId}` : ""}\n${entry.iconsPayload}`,
+            });
+          }
+          return items;
         }),
       };
     }
@@ -183,7 +193,7 @@ async function getFigmaData(
       outputFormat,
       {
         colorTokensDir,
-        imageDir,
+        pruneRejectedIcons,
         onFetchStart: async () => {
           await sendProgress(extra, 0, 3, "Fetching design data from Figma API");
           stopFetchHeartbeat = startProgressHeartbeat(extra, "Waiting for Figma API response");
@@ -212,9 +222,13 @@ async function getFigmaData(
     Logger.log(`Successfully extracted data: ${result.metrics.simplifiedNodeCount} nodes`);
     Logger.log("Sending result to client");
 
-    return {
-      content: [{ type: "text" as const, text: result.formatted }],
-    };
+    // Second content item carries the icon base64 payload (downloadIcons) —
+    // kept separate from the design text so the tree the model reads stays lean.
+    const content = [{ type: "text" as const, text: result.formatted }];
+    if (result.iconsPayload) {
+      content.push({ type: "text" as const, text: result.iconsPayload });
+    }
+    return { content };
   } catch (error) {
     const message = error instanceof Error ? error.message : JSON.stringify(error);
     Logger.error(`Error fetching file ${params.fileKey}:`, message);

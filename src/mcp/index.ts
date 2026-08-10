@@ -56,6 +56,7 @@ export type CreateServerOptions = {
   skipImageDownloads?: boolean;
   imageDir?: string;
   colorTokensDir?: string;
+  pruneRejectedIcons?: boolean;
 };
 
 function createServer(
@@ -66,6 +67,7 @@ function createServer(
     skipImageDownloads = false,
     imageDir,
     colorTokensDir,
+    pruneRejectedIcons = false,
   }: CreateServerOptions,
 ) {
   const server = new McpServer(serverInfo, { instructions: serverInstructions });
@@ -85,6 +87,7 @@ function createServer(
     skipImageDownloads,
     imageDir,
     colorTokensDir,
+    pruneRejectedIcons,
     getClientInfo,
   });
 
@@ -107,6 +110,7 @@ type RegisterToolsOptions = {
   skipImageDownloads: boolean;
   imageDir?: string;
   colorTokensDir?: string;
+  pruneRejectedIcons?: boolean;
   getClientInfo: () => ClientInfo | undefined;
 };
 
@@ -133,7 +137,7 @@ function registerTools(
         options.getClientInfo(),
         extra,
         options.colorTokensDir,
-        options.imageDir,
+        options.pruneRejectedIcons,
       ),
   );
 

@@ -23,6 +23,7 @@ export interface ServerFlags {
   imageDir?: string;
   proxy?: string;
   colorTokensDir?: string;
+  pruneRejectedIcons?: boolean;
   stdio?: boolean;
   noTelemetry?: boolean;
 }
@@ -36,6 +37,7 @@ export interface ServerConfig {
   skipImageDownloads: boolean;
   imageDir: string;
   colorTokensDir: string | undefined;
+  pruneRejectedIcons: boolean;
   isStdioMode: boolean;
   noTelemetry: boolean;
   configSources: Record<string, Source>;
@@ -156,6 +158,16 @@ export function getServerConfig(flags: ServerFlags): ServerConfig {
     envBool("SKIP_IMAGE_DOWNLOADS"),
     false,
   );
+  // Default false: an icon rejected by collectIconAssets (too small, or
+  // native-control decomposition) stays in the tree as a plain node with no
+  // `icon` stamp — real layout information (e.g. a divider), not noise, so
+  // keeping it is the safer default. Set true to prune those nodes from the
+  // tree entirely instead.
+  const pruneRejectedIcons = resolve(
+    flags.pruneRejectedIcons,
+    envBool("PRUNE_REJECTED_ICONS"),
+    false,
+  );
   const envImageDir = envStr("IMAGE_DIR");
   const imageDir = resolve(
     flags.imageDir ? resolvePath(flags.imageDir) : undefined,
@@ -202,6 +214,7 @@ export function getServerConfig(flags: ServerFlags): ServerConfig {
     skipImageDownloads: skipImageDownloads.source,
     imageDir: imageDir.source,
     colorTokensDir: colorTokensDir.source,
+    pruneRejectedIcons: pruneRejectedIcons.source,
     telemetry: telemetrySource,
   };
 
@@ -229,6 +242,9 @@ export function getServerConfig(flags: ServerFlags): ServerConfig {
       `- SKIP_IMAGE_DOWNLOADS: ${skipImageDownloads.value} (source: ${configSources.skipImageDownloads})`,
     );
     console.log(`- IMAGE_DIR: ${imageDir.value} (source: ${configSources.imageDir})`);
+    console.log(
+      `- PRUNE_REJECTED_ICONS: ${pruneRejectedIcons.value} (source: ${configSources.pruneRejectedIcons})`,
+    );
     const telemetryEnabled = resolveTelemetryEnabled(noTelemetry);
     console.log(
       `- TELEMETRY: ${telemetryEnabled ? "enabled" : "disabled"} (source: ${configSources.telemetry})`,
@@ -245,6 +261,7 @@ export function getServerConfig(flags: ServerFlags): ServerConfig {
     skipImageDownloads: skipImageDownloads.value,
     imageDir: imageDir.value,
     colorTokensDir: colorTokensDir.value,
+    pruneRejectedIcons: pruneRejectedIcons.value,
     isStdioMode,
     noTelemetry,
     configSources,
