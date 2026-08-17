@@ -39,15 +39,6 @@ const argv = cli({
       description:
         "Output format for design data: native-yaml (default, fully inlined styles + role tags, no globalVars indirection), native-json, yaml (legacy, globalVars-ref based), json, or tree (experimental compact format).",
     },
-    skipImageDownloads: {
-      type: Boolean,
-      description: "Do not register the download_figma_images tool (skip image downloads)",
-    },
-    imageDir: {
-      type: String,
-      description:
-        "Base directory for image downloads. The download tool will only write files within this directory. Defaults to the current working directory.",
-    },
     proxy: {
       type: String,
       description:

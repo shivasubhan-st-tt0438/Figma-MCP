@@ -27,7 +27,7 @@ export type ToolCallContext = {
 };
 
 export type ValidationRejectInput = {
-  tool: "get_figma_data" | "download_figma_images";
+  tool: "get_figma_data";
   durationMs?: number;
   field: string;
   rule: string;
@@ -78,10 +78,4 @@ export type GetFigmaDataCall = CommonCallProps & {
   has_node_id: boolean;
 };
 
-export type DownloadFigmaImagesCall = CommonCallProps & {
-  tool: "download_figma_images";
-  image_count: number;
-  success_count?: number;
-};
-
-export type ToolCallProperties = GetFigmaDataCall | DownloadFigmaImagesCall;
+export type ToolCallProperties = GetFigmaDataCall;

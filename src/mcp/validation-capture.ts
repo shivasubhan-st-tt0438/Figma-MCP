@@ -72,7 +72,7 @@ export function installValidationRejectCapture(
       if (error instanceof McpError && error.code === ErrorCode.InvalidParams) {
         const issue = await extractIssue(tool, args);
 
-        if (toolName === "get_figma_data" || toolName === "download_figma_images") {
+        if (toolName === "get_figma_data") {
           captureValidationReject(
             {
               tool: toolName,

@@ -26,7 +26,7 @@ describe("stdio transport", () => {
     const toolNames = tools.map((t) => t.name);
 
     expect(toolNames).toContain("get_figma_data");
-    expect(toolNames).toContain("download_figma_images");
+    expect(toolNames).toContain("get_render_urls");
   }, 30_000);
 
   it("starts stdio mode via NODE_ENV=cli", async () => {
@@ -43,6 +43,6 @@ describe("stdio transport", () => {
     const toolNames = tools.map((t) => t.name);
 
     expect(toolNames).toContain("get_figma_data");
-    expect(toolNames).toContain("download_figma_images");
+    expect(toolNames).toContain("get_render_urls");
   }, 30_000);
 });

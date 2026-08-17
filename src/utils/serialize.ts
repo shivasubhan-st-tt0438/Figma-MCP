@@ -1,6 +1,11 @@
 import { serializeAsTree } from "./serialize-tree.js";
 import type { SerializableDesign } from "./serializable-design.js";
-import { toNativeJson, toNativeYaml } from "./native-json.js";
+import {
+  toNativeJson,
+  toNativeYaml,
+  toNativeVariantJson,
+  toNativeVariantYaml,
+} from "./native-json.js";
 import { dumpYaml } from "./yaml-dump.js";
 
 export type OutputFormat = "yaml" | "json" | "tree" | "native-json" | "native-yaml";
@@ -27,4 +32,19 @@ export function serializeResult(result: unknown, format: OutputFormat): string {
   if (format === "native-json") return toNativeJson(result as SerializableDesign);
   if (format === "native-yaml") return toNativeYaml(result as SerializableDesign);
   return dumpYaml(result);
+}
+
+/**
+ * The SECOND document (component-variant data), emitted only for the native
+ * formats — the ones that move components/componentSets out of the primary.
+ * Returns undefined when there's no variant data or the format doesn't use it,
+ * in which case only the single primary document is returned.
+ */
+export function serializeVariantDocument(
+  design: SerializableDesign,
+  format: OutputFormat,
+): string | undefined {
+  if (format === "native-yaml") return toNativeVariantYaml(design);
+  if (format === "native-json") return toNativeVariantJson(design);
+  return undefined;
 }

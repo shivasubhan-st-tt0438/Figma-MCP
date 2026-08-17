@@ -60,6 +60,7 @@ const KEY_MAP: Record<string, string> = {
   propertyDefinitions: "propDefs",
   // text style
   textStyle: "ts",
+  textStyleName: "tsName",
   fontSize: "fs",
   fontWeight: "fw",
   fontFamily: "ff",
@@ -77,7 +78,7 @@ const KEY_MAP: Record<string, string> = {
   boldWeight: "bw",
   // attachments
   implementedBy: "impl",
-  iconFile: "icon",
+  iconUrl: "icon",
   sfSymbols: "sf",
 };
 
@@ -85,7 +86,13 @@ const KEY_LEGEND = Object.entries(KEY_MAP)
   .map(([full, short]) => `${short}=${full}`)
   .join(" ");
 
-function compactId(id: string): string {
+/**
+ * Strip a compound instance-internal id to its last segment — the icon/leaf's
+ * own component-definition id, the only part that identifies "which node this
+ * is" without the full instance-override chain. Same rule the serialized tree
+ * uses, so a render result's id matches how the node appears in the tree.
+ */
+export function compactId(id: string): string {
   const last = id.lastIndexOf(";");
   return last >= 0 ? id.substring(last + 1) : id;
 }
@@ -198,8 +205,23 @@ export function inlineNode(
 function buildNativeDesign(design: SerializableDesign): unknown {
   const styles = design.globalVars?.styles ?? {};
   const tokens = design.globalVars?.tokens ?? {};
+  // When the variant document is present it carries components/componentSets
+  // (enriched with every set's variant list + custom UI), so they're dropped
+  // from the primary here — a node's compId resolves against that document
+  // instead. The node's own `props` (its current variant) is untouched: that
+  // lives on the node, not in these metadata sections.
+  const metadata = design.variantData
+    ? Object.fromEntries(
+        Object.entries(design.metadata).filter(
+          ([key]) => key !== "components" && key !== "componentSets",
+        ),
+      )
+    : design.metadata;
   return {
-    metadata: { ...design.metadata, keys: KEY_LEGEND },
+    metadata: { ...metadata, keys: KEY_LEGEND },
+    // Right after metadata (which carries `guide`) and BEFORE `nodes` — read
+    // the guide, see what to flag/catalog, then read the tree.
+    ...(design.unnamedAssets && { unnamedAssets: design.unnamedAssets }),
     nodes: design.nodes.map((node) => inlineNode(node, styles, tokens)),
     // Already fully inlined by attachComponentVariantReferences (see
     // enrich-design.ts) — passed through as-is, placed last so it reads as
@@ -216,4 +238,26 @@ export function toNativeJson(design: SerializableDesign): string {
 
 export function toNativeYaml(design: SerializableDesign): string {
   return dumpYaml(compactOutput(buildNativeDesign(design)));
+}
+
+/**
+ * The second document: the consolidated component-variant data (see
+ * attachVariantData in variant-cache-pass.ts), compacted with the same key
+ * legend as the primary and carrying its own copy of `keys` so it reads
+ * standalone. Returns undefined when there's nothing to emit.
+ */
+function buildVariantDocument(design: SerializableDesign): Record<string, unknown> | undefined {
+  if (!design.variantData) return undefined;
+  const compact = compactOutput(design.variantData) as Record<string, unknown>;
+  return { date: compact.date, keys: KEY_LEGEND, ...compact };
+}
+
+export function toNativeVariantJson(design: SerializableDesign): string | undefined {
+  const doc = buildVariantDocument(design);
+  return doc ? JSON.stringify(doc, null, 2) : undefined;
+}
+
+export function toNativeVariantYaml(design: SerializableDesign): string | undefined {
+  const doc = buildVariantDocument(design);
+  return doc ? dumpYaml(doc) : undefined;
 }

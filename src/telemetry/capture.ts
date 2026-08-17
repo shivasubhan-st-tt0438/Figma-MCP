@@ -1,11 +1,9 @@
 import { getErrorMeta } from "~/utils/error-meta.js";
 import type { GetFigmaDataOutcome } from "~/services/get-figma-data.js";
-import type { DownloadImagesOutcome } from "~/services/download-figma-images.js";
 import { captureEvent } from "./client.js";
 import type {
   CommonCallProps,
   GetFigmaDataCall,
-  DownloadFigmaImagesCall,
   ToolCallProperties,
   ToolCallContext,
   ValidationRejectInput,
@@ -78,35 +76,11 @@ function toGetFigmaDataEvent(
   };
 }
 
-function toDownloadImagesEvent(
-  outcome: DownloadImagesOutcome,
-  context: ToolCallContext,
-): DownloadFigmaImagesCall {
-  return {
-    tool: "download_figma_images",
-    duration_ms: outcome.durationMs,
-    transport: context.transport,
-    auth_mode: context.authMode,
-    client_name: context.clientInfo?.name,
-    client_version: context.clientInfo?.version,
-    image_count: outcome.imageCount,
-    success_count: outcome.successCount,
-    ...errorFields(outcome.error),
-  };
-}
-
 export function captureGetFigmaDataCall(
   outcome: GetFigmaDataOutcome,
   context: ToolCallContext,
 ): void {
   captureToolCall(toGetFigmaDataEvent(outcome, context));
-}
-
-export function captureDownloadImagesCall(
-  outcome: DownloadImagesOutcome,
-  context: ToolCallContext,
-): void {
-  captureToolCall(toDownloadImagesEvent(outcome, context));
 }
 
 /**
@@ -134,19 +108,11 @@ export function captureValidationReject(
     validation_rule: input.rule,
   };
 
-  if (input.tool === "get_figma_data") {
-    captureToolCall({
-      ...common,
-      tool: "get_figma_data",
-      output_format: input.outputFormat ?? "yaml",
-      depth: null,
-      has_node_id: false,
-    });
-  } else {
-    captureToolCall({
-      ...common,
-      tool: "download_figma_images",
-      image_count: 0,
-    });
-  }
+  captureToolCall({
+    ...common,
+    tool: "get_figma_data",
+    output_format: input.outputFormat ?? "yaml",
+    depth: null,
+    has_node_id: false,
+  });
 }

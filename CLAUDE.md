@@ -59,12 +59,12 @@ The server supports two transports (configured in `src/server.ts`):
 1. **MCP Tools** (`src/mcp/tools/`) — Define tool schemas and handlers
 
    - `get_figma_data` — Fetches and simplifies Figma design data
-   - `download_figma_images` — Downloads images from Figma
+   - `get_render_urls` — Returns downloadable render URLs (PDF/SVG/PNG) for nodes; the client downloads them itself
 
 2. **Figma Service** (`src/services/figma.ts`) — API client for Figma REST API
 
    - Handles auth (Personal Access Token or OAuth)
-   - Methods: `getRawFile()`, `getRawNode()`, `downloadImages()`
+   - Methods: `getRawFile()`, `getRawNode()`, `getNodeRenderUrls()`
 
 3. **Extractor System** (`src/extractors/`) — Transforms raw Figma API responses
 
@@ -88,7 +88,6 @@ The server supports two transports (configured in `src/server.ts`):
 - `FIGMA_OAUTH_TOKEN` or `--figma-oauth-token` — OAuth Bearer token
 - `PORT` or `--port` — HTTP server port (default: 3333)
 - `--json` — Output JSON instead of YAML
-- `--skip-image-downloads` — Disable image download tool
 
 ### Path Alias
 

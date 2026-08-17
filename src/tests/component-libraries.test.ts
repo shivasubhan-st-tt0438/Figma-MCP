@@ -26,24 +26,75 @@ function stubService(libraryName: string): FigmaService {
 }
 
 describe("resolveComponentLibraries — Apple kit vs team library", () => {
-  it("marks Apple's macOS UI kit native (platform name first, emoji prefix ok) — library name itself is not persisted", async () => {
+  it("marks Apple's macOS UI kit native on the node only — component set keeps neither native nor remote", async () => {
     const design = makeDesign();
     await resolveComponentLibraries(design, stubService("🟢 macOS 15 Sequoia (Library)"));
 
-    expect(design.componentSets["10:1"].native).toBe(true);
     expect(design.nodes[0].native).toBe(true);
+    expect("native" in design.componentSets["10:1"]).toBe(false);
+    expect("remote" in design.componentSets["10:1"]).toBe(false);
     expect("library" in design.componentSets["10:1"]).toBe(false);
     expect("library" in design.nodes[0]).toBe(false);
   });
 
-  it("does NOT mark a team library that merely mentions macOS as native", async () => {
+  it("does NOT mark a team library that merely mentions macOS as native, and still strips remote", async () => {
     // Real regression: "🧤 UI Content - macOS" (the design team's own
     // component library) was stamped native by a bare /macos/i test, while
     // its pinned dev resources pointed at custom Swift classes.
     const design = makeDesign();
     await resolveComponentLibraries(design, stubService("🧤 UI Content - macOS"));
 
-    expect(design.componentSets["10:1"].native).toBeUndefined();
     expect(design.nodes[0].native).toBeUndefined();
+    expect("native" in design.componentSets["10:1"]).toBe(false);
+    expect("remote" in design.componentSets["10:1"]).toBe(false);
+  });
+});
+
+describe("resolveComponentLibraries — variant-fetch targets & icon library", () => {
+  function makeIconDesign(): SimplifiedDesign {
+    return {
+      name: "design",
+      nodes: [
+        {
+          id: "1:5",
+          name: "ic_lock",
+          type: "INSTANCE",
+          componentId: "10:2",
+          componentProperties: { Size: "16", Colored: "No" },
+        },
+      ],
+      components: { "10:2": { key: "compkey", name: "Size=16", componentSetId: "10:1" } },
+      componentSets: { "10:1": { key: "setkey", name: "ic_lock", remote: true } },
+      globalVars: { styles: {} },
+    };
+  }
+
+  it("excludes an icon-library set from targets and strips its instance componentProperties", async () => {
+    const design = makeIconDesign();
+    const targets = await resolveComponentLibraries(design, stubService("🛑 Sheet Icons Library"));
+
+    // No fetch target, and no variant list — the icon asset is all that matters.
+    expect(targets.has("10:1")).toBe(false);
+    // componentProperties (Size/Colored variant noise) stripped from the node.
+    expect(design.nodes[0].componentProperties).toBeUndefined();
+  });
+
+  it("keeps a custom (non-native, non-icon) set as a target for fetching", async () => {
+    const design = makeDesign();
+    const targets = await resolveComponentLibraries(design, stubService("🧤 UI Content - macOS"));
+
+    expect(targets.has("10:1")).toBe(true);
+    expect(targets.get("10:1")!.native).toBe(false);
+  });
+
+  it("keeps a native set as a target, marked native (listed, but no UI fetched)", async () => {
+    const design = makeDesign();
+    const targets = await resolveComponentLibraries(
+      design,
+      stubService("🟢 macOS 15 Sequoia (Library)"),
+    );
+
+    expect(targets.has("10:1")).toBe(true);
+    expect(targets.get("10:1")!.native).toBe(true);
   });
 });

@@ -3,16 +3,13 @@ import type {
   GetFileResponse,
   GetFileNodesResponse,
   GetFileMetaResponse,
-  GetImageFillsResponse,
   GetCommentsResponse,
   GetDevResourcesResponse,
   GetComponentResponse,
   GetComponentSetResponse,
   GetFileVersionsResponse,
   GetLocalVariablesResponse,
-  Transform,
 } from "@figma/rest-api-spec";
-import { downloadAndProcessImage, type ImageProcessingResult } from "~/utils/image-processing.js";
 import { Logger } from "~/utils/logger.js";
 import { fetchJSON } from "~/utils/fetch-json.js";
 import { getErrorMeta } from "~/utils/error-meta.js";
@@ -122,17 +119,6 @@ export class FigmaService {
   }
 
   /**
-   * Gets download URLs for image fills without downloading them.
-   *
-   * @returns Map of imageRef to download URL
-   */
-  async getImageFillUrls(fileKey: string): Promise<Record<string, string>> {
-    const endpoint = `/files/${fileKey}/images`;
-    const response = await this.request<GetImageFillsResponse>(endpoint);
-    return response.meta.images || {};
-  }
-
-  /**
    * Gets download URLs for rendered nodes without downloading them.
    *
    * @returns Map of node ID to download URL
@@ -151,8 +137,7 @@ export class FigmaService {
       const response = await this.request<GetImagesResponse>(endpoint);
       return this.filterValidImages(response.images);
     } else if (format === "pdf") {
-      // PDF export is a native Figma format — vectors stay resolution
-      // independent and Jimp never touches the bytes (it can't read PDF).
+      // PDF export is a native Figma format — vectors stay resolution independent.
       const endpoint = `/images/${fileKey}?ids=${nodeIds.join(",")}&format=pdf`;
       const response = await this.request<GetImagesResponse>(endpoint);
       return this.filterValidImages(response.images);
@@ -167,150 +152,6 @@ export class FigmaService {
       const response = await this.request<GetImagesResponse>(endpoint);
       return this.filterValidImages(response.images);
     }
-  }
-
-  /**
-   * Download images method with post-processing support for cropping and returning image dimensions.
-   *
-   * Supports:
-   * - Image fills vs rendered nodes (based on imageRef vs nodeId)
-   * - PNG vs SVG format (based on filename extension)
-   * - Image cropping based on transform matrices
-   * - CSS variable generation for image dimensions
-   *
-   * @returns Array of local file paths for successfully downloaded images
-   */
-  async downloadImages(
-    fileKey: string,
-    localPath: string,
-    items: Array<{
-      imageRef?: string;
-      gifRef?: string;
-      nodeId?: string;
-      fileName: string;
-      needsCropping?: boolean;
-      cropTransform?: Transform;
-      requiresImageDimensions?: boolean;
-    }>,
-    options: { pngScale?: number; svgOptions?: SvgOptions } = {},
-  ): Promise<ImageProcessingResult[]> {
-    if (items.length === 0) return [];
-
-    const resolvedPath = localPath;
-    const { pngScale = 2, svgOptions } = options;
-    const downloadPromises: Promise<ImageProcessingResult[]>[] = [];
-
-    // Separate items by type: image/gif fills vs rendered nodes
-    const imageFills = items.filter(
-      (item): item is typeof item & ({ imageRef: string } | { gifRef: string }) =>
-        !!item.imageRef || !!item.gifRef,
-    );
-    const renderNodes = items.filter(
-      (item): item is typeof item & { nodeId: string } => !!item.nodeId,
-    );
-
-    // Download image fills (static images and animated GIFs) with processing
-    if (imageFills.length > 0) {
-      const fillUrls = await this.getImageFillUrls(fileKey);
-      const fillDownloads = imageFills
-        .map(
-          ({
-            imageRef,
-            gifRef,
-            fileName,
-            needsCropping,
-            cropTransform,
-            requiresImageDimensions,
-          }) => {
-            // gifRef takes priority when present — it points to the animated GIF file.
-            // imageRef only points to a static snapshot frame for GIF nodes.
-            const fillRef = gifRef ?? imageRef;
-            const imageUrl = fillRef ? fillUrls[fillRef] : undefined;
-            return imageUrl
-              ? downloadAndProcessImage(
-                  fileName,
-                  resolvedPath,
-                  imageUrl,
-                  needsCropping,
-                  cropTransform,
-                  requiresImageDimensions,
-                )
-              : null;
-          },
-        )
-        .filter((promise): promise is Promise<ImageProcessingResult> => promise !== null);
-
-      if (fillDownloads.length > 0) {
-        downloadPromises.push(Promise.all(fillDownloads));
-      }
-    }
-
-    // Download rendered nodes with processing
-    if (renderNodes.length > 0) {
-      const pngNodes = renderNodes.filter((node) => !node.fileName.toLowerCase().endsWith(".svg"));
-      const svgNodes = renderNodes.filter((node) => node.fileName.toLowerCase().endsWith(".svg"));
-
-      // Download PNG renders
-      if (pngNodes.length > 0) {
-        const pngUrls = await this.getNodeRenderUrls(
-          fileKey,
-          pngNodes.map((n) => n.nodeId),
-          "png",
-          { pngScale },
-        );
-        const pngDownloads = pngNodes
-          .map(({ nodeId, fileName, needsCropping, cropTransform, requiresImageDimensions }) => {
-            const imageUrl = pngUrls[nodeId];
-            return imageUrl
-              ? downloadAndProcessImage(
-                  fileName,
-                  resolvedPath,
-                  imageUrl,
-                  needsCropping,
-                  cropTransform,
-                  requiresImageDimensions,
-                )
-              : null;
-          })
-          .filter((promise): promise is Promise<ImageProcessingResult> => promise !== null);
-
-        if (pngDownloads.length > 0) {
-          downloadPromises.push(Promise.all(pngDownloads));
-        }
-      }
-
-      // Download SVG renders
-      if (svgNodes.length > 0) {
-        const svgUrls = await this.getNodeRenderUrls(
-          fileKey,
-          svgNodes.map((n) => n.nodeId),
-          "svg",
-          { svgOptions },
-        );
-        const svgDownloads = svgNodes
-          .map(({ nodeId, fileName, needsCropping, cropTransform, requiresImageDimensions }) => {
-            const imageUrl = svgUrls[nodeId];
-            return imageUrl
-              ? downloadAndProcessImage(
-                  fileName,
-                  resolvedPath,
-                  imageUrl,
-                  needsCropping,
-                  cropTransform,
-                  requiresImageDimensions,
-                )
-              : null;
-          })
-          .filter((promise): promise is Promise<ImageProcessingResult> => promise !== null);
-
-        if (svgDownloads.length > 0) {
-          downloadPromises.push(Promise.all(svgDownloads));
-        }
-      }
-    }
-
-    const results = await Promise.all(downloadPromises);
-    return results.flat();
   }
 
   /**

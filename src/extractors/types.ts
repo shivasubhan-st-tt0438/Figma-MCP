@@ -37,16 +37,6 @@ export type ResolvedTokenInfo = {
   themed: boolean;
   /** Suggested AppKit API for this token (e.g. "NSColor.systemBrown"), when known. */
   appkit?: string;
-  /**
-   * Present (true) when the token name was inferred by matching the paint's
-   * resolved color against the local token files, because the bound variable
-   * ID wasn't in them. A color match can mislabel: the paint color the API
-   * returns for a variable-bound fill is a resolution-time snapshot that can
-   * lag the variable's live value (library update not yet accepted, different
-   * mode), so the nearest-color token may be a genuinely different semantic
-   * token. Absent = resolved by exact variable ID, fully trustworthy.
-   */
-  approx?: true;
 };
 
 export interface TraversalContext {
@@ -158,6 +148,36 @@ export interface SimplifiedDesign {
    * native-json.ts) — importing that type here would create a cycle.
    */
   componentVariantReferences?: Record<string, unknown>[];
+  /**
+   * Consolidated component-variant document, emitted as a SECOND YAML
+   * alongside the primary tree (see attachVariantData in variant-cache-pass.ts
+   * and the two-document serialization in native-json.ts). Present only when
+   * the fetch resolved remote component sets. Holds what the primary's
+   * `components`/`componentSets` sections used to carry (so those are omitted
+   * from the primary when this is present, and a node's `compId` resolves
+   * here instead), ENRICHED per set with its full fetched variant UI — for
+   * custom sets only; native/icon sets carry metadata + a tag but no UI
+   * (a native control renders its own states; an icon's content is the asset).
+   * Loosely typed for the same reason as componentVariantReferences: the set
+   * entries hold post-inlining NativeNode data, importing which would cycle.
+   */
+  variantData?: {
+    date: string;
+    components: Record<string, SimplifiedComponentDefinition>;
+    componentSets: Record<string, unknown>;
+  };
+  /**
+   * Assets in the (scoped) tree that carry NO design-system name — a color used
+   * as a raw hex/rgba instead of a bound Variable, an icon with a placeholder
+   * name (Vector/Rectangle/…), or text in a raw font with no named text style.
+   * Surfaced so the consumer can catalog them into a real asset folder (see the
+   * guide) instead of silently shipping unnamed assets. Deduped.
+   */
+  unnamedAssets?: {
+    colors?: string[];
+    icons?: { name: string; id: string }[];
+    fonts?: string[];
+  };
 }
 
 export interface SimplifiedNode {
@@ -167,6 +187,14 @@ export interface SimplifiedNode {
   // text
   text?: string;
   textStyle?: string;
+  /**
+   * The design-system name of the Figma TEXT style this node uses (e.g.
+   * "Body/Regular", "❇️ Emphasized/Title 3"), when it references a named
+   * shared style. Absent means the text uses a raw/unnamed font — which the
+   * unnamed-asset flagging pass surfaces. Captured at extraction because
+   * native inlining collapses `textStyle` to raw values, losing the name.
+   */
+  textStyleName?: string;
   /**
    * The numeric font weight that `**bold**` inside `text` maps to. Only emitted
    * when a text node has per-character bold overrides heavier than its base
@@ -204,33 +232,26 @@ export interface SimplifiedNode {
    */
   sfSymbols?: string[];
   /**
-   * Filename this icon's vector PDF appears under in the response's separate
-   * icons payload (base64). Present only when the fetch was called with
-   * downloadIcons: true (see collectIconAssets) and this node is icon-shaped
-   * (type IMAGE-SVG). The bytes ride back in the tool response — NOT written to
-   * the server's disk — so the client materializes them itself
-   * (native/apply-figma-asset.sh); no separate download call needed per icon.
+   * A downloadable Figma render URL (vector PDF) for this icon, stamped by
+   * collectIconRenderUrls when the fetch was called with `downloadIcons: true`
+   * and this node is an icon (type IMAGE-SVG, any size, not native
+   * decomposition). Fetch the URL to get the bytes — the server never writes
+   * files. The URL has no extension/filename; save the download as
+   * `<node name>.pdf` using this node's own `name` (its real Figma icon name),
+   * not the URL's random id. Present only on icons that actually rendered.
    */
-  iconFile?: string;
+  iconUrl?: string;
   /**
    * This node already has a real Swift implementation — a designer pinned a
    * Dev Resources link ending in .swift (Figma's widget requires something
    * URL-shaped, so a bare file path gets an "https://" prefix bolted on to
    * pass validation; stripped here). `file` is its repo-relative path.
-   * `symbol` is the raw name the designer typed — NOT guaranteed to be a
-   * class: Figma's Dev Resources panel is free text, so the naming
-   * CONVENTION is what gives it structure. `scopePath` (present only when
-   * `symbol` contains "_") splits it into an outermost-to-innermost scope
-   * chain: "ClassName" (just symbol, no scopePath) = the type itself;
-   * "ClassName_variableName" = a property inside it; "ClassName_
-   * functionName_variableName" = a variable inside a method;
-   * "functionName_variableName" = a variable inside a free function (no
-   * class). Resolve it by locating the outermost element first, then
-   * searching inside it for the next — the last element is the exact
-   * declaration. Takes priority over native — see attachDevResources in
-   * enrich-design.ts.
+   * `symbol` is the Swift class name this node is implemented by — the entire
+   * name the designer typed, taken verbatim (no decomposition, even if it
+   * contains underscores). Takes priority over native — see attachDevResources
+   * in enrich-design.ts.
    */
-  implementedBy?: { file: string; symbol: string; scopePath?: string[] }[];
+  implementedBy?: { file: string; symbol: string }[];
   // layout & alignment
   layout?: string;
   /**

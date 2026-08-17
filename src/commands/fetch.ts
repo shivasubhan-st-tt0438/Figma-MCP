@@ -59,11 +59,6 @@ export const fetchCommand: Command = command(
         description:
           "Directory containing DTCG color token JSON exports (e.g. Light.tokens.json, Dark.tokens.json) used to resolve Figma Variable-bound fills to friendly names before falling back to the live Variables API.",
       },
-      downloadIcons: {
-        type: Boolean,
-        description:
-          "Auto-download every icon (IMAGE-SVG node) in the fetched tree as a base64-encoded vector PDF, and stamp iconFile on each icon node in the output.",
-      },
       noTelemetry: {
         type: Boolean,
         description: "Disable usage telemetry",
@@ -91,7 +86,6 @@ async function run(
     figmaOauthToken?: string;
     env?: string;
     colorTokensDir?: string;
-    downloadIcons?: boolean;
     noTelemetry?: boolean;
   },
   positionals: string[],
@@ -138,7 +132,7 @@ async function run(
 
   const result = await getFigmaData(
     new FigmaService(auth),
-    { fileKey, nodeId, depth: flags.depth, downloadIcons: flags.downloadIcons },
+    { fileKey, nodeId, depth: flags.depth },
     outputFormat,
     {
       onComplete: (outcome) =>

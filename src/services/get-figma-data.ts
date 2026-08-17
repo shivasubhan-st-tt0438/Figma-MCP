@@ -6,7 +6,7 @@ import {
   collapseSvgContainers,
 } from "~/extractors/index.js";
 import { writeLogs, debugSlug } from "~/utils/logger.js";
-import { serializeResult, type OutputFormat } from "~/utils/serialize.js";
+import { serializeResult, serializeVariantDocument, type OutputFormat } from "~/utils/serialize.js";
 import { wrapForSerialization } from "~/utils/serializable-design.js";
 import { tagError } from "~/utils/error-meta.js";
 import {
@@ -30,14 +30,12 @@ import {
   attachDevResourcesBatch,
   annotateSfSymbols,
   addConsumptionGuide,
+  loadIconDownloadScript,
 } from "~/services/enrich-design.js";
-import { collectIconAssets } from "~/services/download-icons.js";
+import { collectIconRenderUrls } from "~/services/render-icons.js";
+import { attachVariantData } from "~/services/variant-cache-pass.js";
+import { flagUnnamedAssets } from "~/services/flag-unnamed-assets.js";
 import type { SimplifiedDesign } from "~/extractors/types.js";
-import {
-  applyNote,
-  buildReturnedAssetPayload,
-  type ReturnedAssetFile,
-} from "~/utils/returned-asset.js";
 
 export type { GetFigmaDataMetrics } from "~/services/get-figma-data-metrics.js";
 
@@ -46,9 +44,12 @@ export type GetFigmaDataInput = {
   nodeId?: string;
   depth?: number;
   /**
-   * Auto-download every icon (IMAGE-SVG node) in the fetched tree as a
-   * base64-encoded vector PDF, and stamp iconFile on each one — see
-   * download-icons.ts.
+   * Stamp a downloadable render URL (vector PDF) onto every icon (IMAGE-SVG,
+   * any size, not native decomposition) in the scoped subtree, as the node's
+   * `iconUrl` — "give me links for all the icons here" without enumerating ids.
+   * The icon's Figma name is already on the node (`name`), so a consumer can
+   * save each as `<name>.pdf`. One batched /images call. See
+   * collectIconRenderUrls.
    */
   downloadIcons?: boolean;
   /**
@@ -76,27 +77,15 @@ export type GetFigmaDataInput = {
 export type GetFigmaDataResult = {
   formatted: string;
   metrics: GetFigmaDataMetrics;
+  /** The second document (component-variant data), when the native format emitted one. */
+  variantsFormatted?: string;
   /**
-   * Present only when `downloadIcons` collected icons: a second, self-contained
-   * write-files payload (name + catalog-relative path + base64 per icon PDF)
-   * the client applies with native/apply-figma-asset.sh. Kept OUT of `formatted`
-   * so the design tree the model reads stays lean — the base64 rides in its own
-   * response content item. See collectIconAssets.
+   * The icon-download script's own source, included whenever this fetch used
+   * `downloadIcons` — shipped fresh from the server every time rather than
+   * assumed to already exist in the consumer's repo. See loadIconDownloadScript.
    */
-  iconsPayload?: string;
+  iconScript?: string;
 };
-
-/** Wrap collected icon files into the payload the client/apply-script consumes. */
-function buildIconsPayload(iconAssets: ReturnedAssetFile[]): string {
-  return buildReturnedAssetPayload(
-    "icons",
-    iconAssets,
-    applyNote(
-      "Pre-fetched icon PDFs (base64), one per node carrying a matching iconFile above. " +
-        "Decode each to binary; use them to build imagesets or reference directly — no per-icon re-fetch needed.",
-    ),
-  );
-}
 
 export type GetFigmaDataOutcome = {
   input: GetFigmaDataInput;
@@ -134,15 +123,6 @@ export type GetFigmaDataHooks = {
    * names before falling back to the live Variables API. See resolveVariableFillNames.
    */
   colorTokensDir?: string;
-  /**
-   * When collectIconAssets rejects a node (too small, or native-control
-   * decomposition), prune it from the tree instead of leaving it as a plain
-   * unstamped node. Default false — a rejected node is still real layout
-   * information (e.g. a divider), so keeping it is the safer default; set
-   * true to reclaim the token cost of icon-shaped nodes that never make it
-   * into the icons payload anyway.
-   */
-  pruneRejectedIcons?: boolean;
 };
 
 /**
@@ -160,7 +140,7 @@ export async function getFigmaData(
   outputFormat: OutputFormat,
   hooks: GetFigmaDataHooks = {},
 ): Promise<GetFigmaDataResult> {
-  const { fileKey, nodeId, depth, downloadIcons: shouldDownloadIcons, focusNodeId, find } = input;
+  const { fileKey, nodeId, depth, focusNodeId, find, downloadIcons } = input;
   const startedAt = Date.now();
   let metrics: GetFigmaDataMetrics | undefined;
   let caughtError: unknown;
@@ -168,9 +148,6 @@ export async function getFigmaData(
   // response is a compact candidate listing instead of the serialized design —
   // held here so the serialize step emits it in place of the full tree.
   let findListing: string | undefined;
-  // Icons collected as base64 when downloadIcons is set — returned as a second
-  // payload alongside the design (see GetFigmaDataResult.iconsPayload).
-  let iconAssets: ReturnedAssetFile[] = [];
   // Per-call counter shared with the walker. Lives in the call closure so
   // overlapping HTTP requests each have their own — no module-global state.
   const nodeCounter = { count: 0 };
@@ -246,21 +223,14 @@ export async function getFigmaData(
       // shared with the eventual disambiguated re-fetch; spending them here
       // would only make that next call more likely to get throttled.
       if (!findListing) {
-        // Best-effort: replace auto-generated fill_XXXXXX names with the real
-        // Figma Variable name wherever a bound variable can be resolved. Tries
-        // local DTCG color token files first (free, unambiguous ID match, with
-        // a hex+alpha fallback), then the live Variables API for anything
-        // still unresolved. Silently falls back to the synthetic name (today's
-        // behavior) if neither source can resolve a given variable.
+        // Replace auto-generated fill_XXXXXX names with the real Figma Variable
+        // name by EXACT variable-ID match against the local DTCG color token
+        // exports (Colors - HIG). ID-only: no color/hex guessing, no live
+        // Variables API. A bound fill whose id isn't in the exports is left as
+        // a raw value and surfaced later by the unnamed-asset flagging pass.
         const localTokens = loadColorTokensDir(hooks.colorTokensDir);
         const appkitHints = loadAppkitColorHints(hooks.colorTokensDir);
-        simplifiedDesign = await resolveVariableFillNames(
-          simplifiedDesign,
-          figmaService,
-          fileKey,
-          localTokens,
-          appkitHints,
-        );
+        simplifiedDesign = resolveVariableFillNames(simplifiedDesign, localTokens, appkitHints);
 
         // Structured variant state, component-set property definitions (one
         // extra batched /nodes call), component source libraries (native vs.
@@ -270,24 +240,30 @@ export async function getFigmaData(
         // above — scoped to whatever subtree survived it.
         parseVariantProperties(simplifiedDesign);
         await enrichComponentSetDefinitions(simplifiedDesign, figmaService, fileKey);
-        await resolveComponentLibraries(simplifiedDesign, figmaService);
+        const variantTargets = await resolveComponentLibraries(simplifiedDesign, figmaService);
+        // Fetch + cache the full variant set of every remote component (UI for
+        // custom sets; metadata-only for native/icon) into a second document.
+        // Runs on the resolved targets from the line above — no extra key
+        // lookups. Native formats only: they're the ones that move
+        // components/componentSets into the second document; other formats
+        // keep the single-document shape unchanged.
+        if (outputFormat.startsWith("native-")) {
+          await attachVariantData(simplifiedDesign, variantTargets, figmaService);
+        }
         await attachDevResources(simplifiedDesign, figmaService, fileKey);
         // Runs AFTER dev-resources attachment, not before: a .swift link
         // pinned on an exact node that turns out to be purely decorative
         // must still resolve before that node is potentially pruned away.
         pruneNativeDecoration(simplifiedDesign);
         annotateSfSymbols(simplifiedDesign);
-
-        // Icons come back as base64 in the response, not written to a server
-        // directory, so a remote client gets them with no config needed.
-        if (shouldDownloadIcons) {
-          iconAssets = await collectIconAssets(
-            simplifiedDesign,
-            figmaService,
-            fileKey,
-            hooks.pruneRejectedIcons ?? false,
-          );
+        // After pruning/focus so we only render icons that survived into the
+        // scoped tree — one batched /images call, stamped inline as iconUrl.
+        if (downloadIcons) {
+          await collectIconRenderUrls(simplifiedDesign, figmaService, fileKey);
         }
+        // Last, on the final pruned/scoped tree: surface colors/icons/fonts
+        // that carry no design-system name.
+        flagUnnamedAssets(simplifiedDesign);
         addConsumptionGuide(simplifiedDesign, outputFormat);
       }
     } catch (error) {
@@ -305,9 +281,13 @@ export async function getFigmaData(
     await hooks.onSerializeStart?.();
     const serializeStart = Date.now();
     let formatted: string;
+    let variantsFormatted: string | undefined;
     try {
-      formatted =
-        findListing ?? serializeResult(wrapForSerialization(simplifiedDesign), outputFormat);
+      const wrapped = wrapForSerialization(simplifiedDesign);
+      formatted = findListing ?? serializeResult(wrapped, outputFormat);
+      // No second document for a candidate listing (findListing) — that's a
+      // directory of ids, not design data.
+      variantsFormatted = findListing ? undefined : serializeVariantDocument(wrapped, outputFormat);
     } catch (error) {
       tagError(error, { phase: "serialize" });
     }
@@ -320,6 +300,7 @@ export async function getFigmaData(
         ? "txt"
         : "yaml";
     writeLogs(`figma-final-${debugId}.${finalExt}`, formatted);
+    if (variantsFormatted) writeLogs(`figma-variants-${debugId}.${finalExt}`, variantsFormatted);
 
     metrics = {
       rawSizeKb,
@@ -341,7 +322,8 @@ export async function getFigmaData(
     return {
       formatted,
       metrics,
-      ...(iconAssets.length > 0 && { iconsPayload: buildIconsPayload(iconAssets) }),
+      variantsFormatted,
+      iconScript: downloadIcons ? loadIconDownloadScript() : undefined,
     };
   } catch (error) {
     caughtError = error;
@@ -375,7 +357,7 @@ type TargetProcessingResult = {
   hasVariables: boolean;
   fetchMs: number;
   simplifyMs: number;
-  iconAssets: ReturnedAssetFile[];
+  downloadIcons?: boolean;
 };
 
 /**
@@ -389,9 +371,10 @@ type TargetProcessingResult = {
 async function fetchAndEnrichTarget(
   figmaService: FigmaService,
   target: GetFigmaDataInput,
-  hooks: Pick<GetFigmaDataHooks, "colorTokensDir" | "pruneRejectedIcons">,
+  outputFormat: OutputFormat,
+  hooks: Pick<GetFigmaDataHooks, "colorTokensDir">,
 ): Promise<TargetProcessingResult> {
-  const { fileKey, nodeId, depth, downloadIcons: shouldDownloadIcons, focusNodeId } = target;
+  const { fileKey, nodeId, depth, focusNodeId, downloadIcons } = target;
   const nodeCounter = { count: 0 };
 
   const fetchStart = Date.now();
@@ -419,17 +402,14 @@ async function fetchAndEnrichTarget(
   });
   const localTokens = loadColorTokensDir(hooks.colorTokensDir);
   const appkitHints = loadAppkitColorHints(hooks.colorTokensDir);
-  simplifiedDesign = await resolveVariableFillNames(
-    simplifiedDesign,
-    figmaService,
-    fileKey,
-    localTokens,
-    appkitHints,
-  );
+  simplifiedDesign = resolveVariableFillNames(simplifiedDesign, localTokens, appkitHints);
 
   parseVariantProperties(simplifiedDesign);
   await enrichComponentSetDefinitions(simplifiedDesign, figmaService, fileKey);
-  await resolveComponentLibraries(simplifiedDesign, figmaService);
+  const variantTargets = await resolveComponentLibraries(simplifiedDesign, figmaService);
+  if (outputFormat.startsWith("native-")) {
+    await attachVariantData(simplifiedDesign, variantTargets, figmaService);
+  }
   // pruneNativeDecoration is NOT called here — in the batch path, dev
   // resources are attached later at the batch level (attachDevResourcesBatch,
   // in getFigmaDataBatch), after every target has run this function. Pruning
@@ -445,16 +425,11 @@ async function fetchAndEnrichTarget(
   if (focusNodeId) {
     focusDesignSubtree(simplifiedDesign, focusNodeId);
   }
-  // Icons come back as base64 in the response, not written to disk (see
-  // collectIconAssets).
-  const iconAssets = shouldDownloadIcons
-    ? await collectIconAssets(
-        simplifiedDesign,
-        figmaService,
-        fileKey,
-        hooks.pruneRejectedIcons ?? false,
-      )
-    : [];
+  // Render icons on the post-focus tree (same batched /images approach as the
+  // single-target path), stamped inline as iconUrl.
+  if (downloadIcons) {
+    await collectIconRenderUrls(simplifiedDesign, figmaService, fileKey);
+  }
   const simplifyMs = Date.now() - simplifyStart;
 
   return {
@@ -467,7 +442,7 @@ async function fetchAndEnrichTarget(
     hasVariables: detectVariables(rawApiResponse),
     fetchMs,
     simplifyMs,
-    iconAssets,
+    downloadIcons,
   };
 }
 
@@ -476,8 +451,10 @@ export type GetFigmaDataBatchEntryResult = {
   nodeId?: string;
   formatted?: string;
   metrics?: GetFigmaDataMetrics;
-  /** Per-target icon base64 payload (see GetFigmaDataResult.iconsPayload), when downloadIcons collected any. */
-  iconsPayload?: string;
+  /** The second document (component-variant data) for this target, when the native format emitted one. */
+  variantsFormatted?: string;
+  /** The icon-download script's source, when this target used downloadIcons. See loadIconDownloadScript. */
+  iconScript?: string;
   /** Set instead of formatted/metrics when this one target's fetch failed — isolated, never breaks the rest of the batch. */
   error?: string;
 };
@@ -488,7 +465,7 @@ export type GetFigmaDataBatchResult = {
 
 export type GetFigmaDataBatchHooks = Pick<
   GetFigmaDataHooks,
-  "colorTokensDir" | "pruneRejectedIcons" | "onFetchStart" | "onSerializeStart"
+  "colorTokensDir" | "onFetchStart" | "onSerializeStart"
 >;
 
 /**
@@ -532,7 +509,7 @@ export async function getFigmaDataBatch(
   const processed = await Promise.all(
     targets.map(async (target) => {
       try {
-        const result = await fetchAndEnrichTarget(figmaService, target, hooks);
+        const result = await fetchAndEnrichTarget(figmaService, target, outputFormat, hooks);
         return { ok: true as const, ...result };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -554,6 +531,7 @@ export async function getFigmaDataBatch(
       figmaService,
     );
     for (const p of succeeded) pruneNativeDecoration(p.design);
+    for (const p of succeeded) flagUnnamedAssets(p.design);
     addConsumptionGuide(succeeded[0].design, outputFormat);
   }
 
@@ -564,7 +542,9 @@ export async function getFigmaDataBatch(
       return { fileKey: p.fileKey, nodeId: p.nodeId, error: p.error };
     }
     const serializeStart = Date.now();
-    const formatted = serializeResult(wrapForSerialization(p.design), outputFormat);
+    const wrapped = wrapForSerialization(p.design);
+    const formatted = serializeResult(wrapped, outputFormat);
+    const variantsFormatted = serializeVariantDocument(wrapped, outputFormat);
     const serializeMs = Date.now() - serializeStart;
 
     const finalExt = outputFormat.includes("json")
@@ -573,6 +553,8 @@ export async function getFigmaDataBatch(
         ? "txt"
         : "yaml";
     writeLogs(`figma-final-${debugSlug(p.fileKey, p.nodeId)}.${finalExt}`, formatted);
+    if (variantsFormatted)
+      writeLogs(`figma-variants-${debugSlug(p.fileKey, p.nodeId)}.${finalExt}`, variantsFormatted);
     const simplifiedSizeKb = Buffer.byteLength(formatted, "utf8") / 1024;
     const measured = measureSimplifiedDesign(p.design);
 
@@ -598,8 +580,9 @@ export async function getFigmaDataBatch(
       fileKey: p.fileKey,
       nodeId: p.nodeId,
       formatted,
+      variantsFormatted,
+      iconScript: p.downloadIcons ? loadIconDownloadScript() : undefined,
       metrics,
-      ...(p.iconAssets.length > 0 && { iconsPayload: buildIconsPayload(p.iconAssets) }),
     };
   });
 

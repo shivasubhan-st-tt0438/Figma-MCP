@@ -172,6 +172,12 @@ export const textExtractor: ExtractorFn = (node, result, context) => {
     const textStyle = extractTextStyle(node);
     if (textStyle) {
       result.textStyle = registerStyle(node, context, textStyle, ["text", "typography"], "style");
+      // Capture the design-system text-style NAME (e.g. "Body/Regular") when
+      // this text references a named shared style. Read before native inlining
+      // collapses textStyle to raw values; absence = a raw/unnamed font, which
+      // the unnamed-asset flagging pass surfaces.
+      const styleMatch = getStyleMatch(node, context, ["text", "typography"]);
+      if (styleMatch) result.textStyleName = styleMatch.name;
     }
   }
 };

@@ -72,7 +72,7 @@ const parameters = {
     .boolean()
     .optional()
     .describe(
-      "Auto-download every icon (IMAGE-SVG node) in the fetched tree as a vector PDF into the server's image directory, and stamp iconFile (the saved filename) on each icon node in the response — no separate download_figma_images call needed per icon. Recommended whenever this fetch is for implementing or comparing UI, not for a quick structural read.",
+      "Stamp a downloadable render URL (vector PDF) onto every icon (IMAGE-SVG node, any size) in the fetched/scoped subtree, as each icon node's `icon` field — 'give me links for all the icons here' in one call, no need to list icon node ids yourself. One extra Figma render call, batched for all icons. Recommended when this fetch is for implementing UI. A node Figma can't export alone (rare, e.g. some native-library internals) is left without an `icon` link.",
     ),
   focusNodeId: focusNodeIdSchema
     .optional()
@@ -82,7 +82,7 @@ const parameters = {
   find: focusNodeIdSchema
     .optional()
     .describe(
-      "OPTIONAL. DISCOVERY: locate a node by its exact NAME when you don't know its id — the right first step when a large node was given but you only want one part of it (e.g. fetch 'Table Style' out of a whole screen). Matches the WHOLE name, case-insensitively, not a substring or partial word — 'Frame 1' only matches a node literally named 'Frame 1', never 'Frame 15' or 'Frame 3465341'. If EXACTLY ONE node matches, the result is that node's full focused detail (as if you'd passed its id to focusNodeId) — one call, done. If ZERO or MANY match, the result is a compact candidate listing (id + name + type + path per hit), NOT the full tree, and NO further Figma API calls are spent — read it, then re-fetch with focusNodeId set to the id you want. Takes precedence over focusNodeId. downloadIcons applies only when a single match auto-focuses.",
+      "OPTIONAL. DISCOVERY: locate a node by its exact NAME when you don't know its id — the right first step when a large node was given but you only want one part of it (e.g. fetch 'Table Style' out of a whole screen). Matches the WHOLE name, case-insensitively, not a substring or partial word — 'Frame 1' only matches a node literally named 'Frame 1', never 'Frame 15' or 'Frame 3465341'. If EXACTLY ONE node matches, the result is that node's full focused detail (as if you'd passed its id to focusNodeId) — one call, done. If ZERO or MANY match, the result is a compact candidate listing (id + name + type + path per hit), NOT the full tree, and NO further Figma API calls are spent — read it, then re-fetch with focusNodeId set to the id you want. Takes precedence over focusNodeId.",
     ),
   targets: z
     .array(targetSchema)
@@ -110,7 +110,6 @@ async function getFigmaData(
   clientInfo: ClientInfo | undefined,
   extra: ToolExtra,
   colorTokensDir?: string,
-  pruneRejectedIcons?: boolean,
 ) {
   try {
     const parsed = parametersSchema.parse(params);
@@ -134,7 +133,6 @@ async function getFigmaData(
         outputFormat,
         {
           colorTokensDir,
-          pruneRejectedIcons,
           onFetchStart: async () => {
             await sendProgress(extra, 0, 2, `Fetching ${targets.length} Figma targets`);
           },
@@ -148,20 +146,36 @@ async function getFigmaData(
         `Batch complete: ${batchResult.entries.filter((e) => !e.error).length}/${targets.length} targets succeeded`,
       );
 
+      // The script is identical for every target — attach it once, to the
+      // first target that used downloadIcons, same dedup discipline as the
+      // consumption guide / componentVariantReferences at the batch level.
+      let iconScriptAttached = false;
       return {
-        // flatMap: each target emits its design text, then (if any) its own icon
-        // base64 payload as a separate content item — one target's icons stay
-        // adjacent to that target's design.
+        // flatMap: each target emits its design document, then (if any) its own
+        // component-variant document as a separate content item — one target's
+        // variants stay adjacent to that target's design.
         content: batchResult.entries.flatMap((entry) => {
           const header = `# Target: ${entry.fileKey}${entry.nodeId ? `/${entry.nodeId}` : ""}`;
           const text = entry.error
             ? `${header}\nError fetching this target: ${entry.error}`
             : `${header}\n${entry.formatted}`;
           const items = [{ type: "text" as const, text }];
-          if (entry.iconsPayload) {
+          if (entry.variantsFormatted) {
             items.push({
               type: "text" as const,
-              text: `# Icons for ${entry.fileKey}${entry.nodeId ? `/${entry.nodeId}` : ""}\n${entry.iconsPayload}`,
+              text: `# Component variants for ${entry.fileKey}${entry.nodeId ? `/${entry.nodeId}` : ""}\n${entry.variantsFormatted}`,
+            });
+          }
+          if (entry.iconScript && !iconScriptAttached) {
+            iconScriptAttached = true;
+            items.push({
+              type: "text" as const,
+              text:
+                `# download_icons.py (save this exact content as a file, then run it — one\n` +
+                `# copy covers every target in this batch that used downloadIcons)\n` +
+                `# Usage: collect every {name, icon} pair from a target's tree into a JSON\n` +
+                `# array and run: python3 <saved-path> <output-dir>  (array on stdin, or a file arg)\n` +
+                entry.iconScript,
             });
           }
           return items;
@@ -193,7 +207,6 @@ async function getFigmaData(
       outputFormat,
       {
         colorTokensDir,
-        pruneRejectedIcons,
         onFetchStart: async () => {
           await sendProgress(extra, 0, 3, "Fetching design data from Figma API");
           stopFetchHeartbeat = startProgressHeartbeat(extra, "Waiting for Figma API response");
@@ -222,11 +235,25 @@ async function getFigmaData(
     Logger.log(`Successfully extracted data: ${result.metrics.simplifiedNodeCount} nodes`);
     Logger.log("Sending result to client");
 
-    // Second content item carries the icon base64 payload (downloadIcons) —
-    // kept separate from the design text so the tree the model reads stays lean.
+    // Second content item carries the component-variant document (the moved-out
+    // components/componentSets, enriched with each set's variants) — kept
+    // separate from the primary tree so the design the model reads stays lean.
     const content = [{ type: "text" as const, text: result.formatted }];
-    if (result.iconsPayload) {
-      content.push({ type: "text" as const, text: result.iconsPayload });
+    if (result.variantsFormatted) {
+      content.push({
+        type: "text" as const,
+        text: `# Component variants\n${result.variantsFormatted}`,
+      });
+    }
+    if (result.iconScript) {
+      content.push({
+        type: "text" as const,
+        text:
+          `# download_icons.py (save this exact content as a file, then run it)\n` +
+          `# Usage: collect every {name, icon} pair from the tree above into a JSON\n` +
+          `# array and run: python3 <saved-path> <output-dir>  (array on stdin, or a file arg)\n` +
+          result.iconScript,
+      });
     }
     return { content };
   } catch (error) {

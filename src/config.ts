@@ -19,11 +19,8 @@ export interface ServerFlags {
   host?: string;
   json?: boolean;
   format?: string;
-  skipImageDownloads?: boolean;
-  imageDir?: string;
   proxy?: string;
   colorTokensDir?: string;
-  pruneRejectedIcons?: boolean;
   stdio?: boolean;
   noTelemetry?: boolean;
 }
@@ -34,10 +31,7 @@ export interface ServerConfig {
   host: string;
   proxy: string | undefined;
   outputFormat: OutputFormat;
-  skipImageDownloads: boolean;
-  imageDir: string;
   colorTokensDir: string | undefined;
-  pruneRejectedIcons: boolean;
   isStdioMode: boolean;
   noTelemetry: boolean;
   configSources: Record<string, Source>;
@@ -153,27 +147,6 @@ export function getServerConfig(flags: ServerFlags): ServerConfig {
   const figmaOauthToken = resolve(flags.figmaOauthToken, envStr("FIGMA_OAUTH_TOKEN"), "");
   const port = resolve(flags.port, envInt("FRAMELINK_PORT", "PORT"), 3333);
   const host = resolve(flags.host, envStr("FRAMELINK_HOST"), "127.0.0.1");
-  const skipImageDownloads = resolve(
-    flags.skipImageDownloads,
-    envBool("SKIP_IMAGE_DOWNLOADS"),
-    false,
-  );
-  // Default false: an icon rejected by collectIconAssets (too small, or
-  // native-control decomposition) stays in the tree as a plain node with no
-  // `icon` stamp — real layout information (e.g. a divider), not noise, so
-  // keeping it is the safer default. Set true to prune those nodes from the
-  // tree entirely instead.
-  const pruneRejectedIcons = resolve(
-    flags.pruneRejectedIcons,
-    envBool("PRUNE_REJECTED_ICONS"),
-    false,
-  );
-  const envImageDir = envStr("IMAGE_DIR");
-  const imageDir = resolve(
-    flags.imageDir ? resolvePath(flags.imageDir) : undefined,
-    envImageDir ? resolvePath(envImageDir) : undefined,
-    process.cwd(),
-  );
 
   // Only resolve explicit proxy config here. Standard env vars (HTTPS_PROXY, HTTP_PROXY,
   // NO_PROXY) are handled by undici's EnvHttpProxyAgent at the dispatcher level, which
@@ -211,10 +184,7 @@ export function getServerConfig(flags: ServerFlags): ServerConfig {
     host: host.source,
     proxy: proxy.source,
     outputFormat: outputFormat.source,
-    skipImageDownloads: skipImageDownloads.source,
-    imageDir: imageDir.source,
     colorTokensDir: colorTokensDir.source,
-    pruneRejectedIcons: pruneRejectedIcons.source,
     telemetry: telemetrySource,
   };
 
@@ -238,13 +208,6 @@ export function getServerConfig(flags: ServerFlags): ServerConfig {
     console.log(`- FRAMELINK_HOST: ${host.value} (source: ${configSources.host})`);
     console.log(`- PROXY: ${proxy.value ? "configured" : "none"} (source: ${configSources.proxy})`);
     console.log(`- OUTPUT_FORMAT: ${outputFormat.value} (source: ${configSources.outputFormat})`);
-    console.log(
-      `- SKIP_IMAGE_DOWNLOADS: ${skipImageDownloads.value} (source: ${configSources.skipImageDownloads})`,
-    );
-    console.log(`- IMAGE_DIR: ${imageDir.value} (source: ${configSources.imageDir})`);
-    console.log(
-      `- PRUNE_REJECTED_ICONS: ${pruneRejectedIcons.value} (source: ${configSources.pruneRejectedIcons})`,
-    );
     const telemetryEnabled = resolveTelemetryEnabled(noTelemetry);
     console.log(
       `- TELEMETRY: ${telemetryEnabled ? "enabled" : "disabled"} (source: ${configSources.telemetry})`,
@@ -258,10 +221,7 @@ export function getServerConfig(flags: ServerFlags): ServerConfig {
     host: host.value,
     proxy: proxy.value,
     outputFormat: outputFormat.value,
-    skipImageDownloads: skipImageDownloads.value,
-    imageDir: imageDir.value,
     colorTokensDir: colorTokensDir.value,
-    pruneRejectedIcons: pruneRejectedIcons.value,
     isStdioMode,
     noTelemetry,
     configSources,

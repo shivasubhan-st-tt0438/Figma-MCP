@@ -11,6 +11,7 @@
   "files": [
     "dist",
     "prompts",
+    "assets",
     "README.md"
   ],
   "scripts": {
@@ -52,11 +53,6 @@
   "license": "MIT",
   "dependencies": {
     "@figma/rest-api-spec": "^0.37.0",
-    "@jimp/core": "^1.6.0",
-    "@jimp/js-gif": "^1.6.0",
-    "@jimp/js-jpeg": "^1.6.0",
-    "@jimp/js-png": "^1.6.0",
-    "@jimp/plugin-crop": "^1.6.0",
     "@modelcontextprotocol/sdk": "1.29.0",
     "cleye": "^2.2.1",
     "cross-env": "^7.0.3",

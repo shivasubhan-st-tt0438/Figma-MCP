@@ -98,12 +98,47 @@ function isAppleMacosLibrary(libraryName: string): boolean {
 }
 
 /**
+ * Detects the design system's icon library (e.g. "🛑 Sheet Icons Library").
+ * Components published from it are pure icon assets — their "variants" are
+ * size/color, not UI states — so they get no source fetch, no variant list,
+ * and their componentProperties are stripped (see resolveComponentLibraries).
+ * Name-based like isAppleMacosLibrary (emoji/case stripped by slugify), so it
+ * needs no hardcoded file key and survives the library being re-keyed.
+ */
+function isIconLibrary(libraryName: string): boolean {
+  const slug = slugify(libraryName);
+  return slug.includes("icon") && slug.includes("library");
+}
+
+/**
+ * One remote component set's identity + where its full variant set lives,
+ * produced by resolveComponentLibraries and consumed by the variant-cache
+ * pass. `source` is absent when the publish-key → file lookup failed (the set
+ * can still be listed, just not fetched).
+ */
+export interface VariantSetTarget {
+  /** The set's id in the fetched design — what a node's compId → compSetId resolves to. */
+  setId: string;
+  /** Human-readable set name, e.g. "Push Button". */
+  name: string;
+  /** Stable publish key — the cross-file-stable cache identity for this set. */
+  publishKey: string;
+  /** True when the set is Apple's macOS kit: agent maps to the real NS* control, ignores the variant UI. */
+  native: boolean;
+  /** Source library file + the set's node within it; absent when key resolution failed. */
+  source?: { fileKey: string; nodeId: string };
+}
+
+/**
  * Resolve which library file every remote component was published from, and
- * stamp `native` (is it Apple's macOS UI kit?) onto component sets, set-less
- * components, and every INSTANCE node. The library file's own name is
- * resolved purely to make that one boolean decision — it's never persisted
- * on the output; once native/custom is decided, the name string itself has
- * nothing left to add downstream.
+ * stamp `native` (is it Apple's macOS UI kit?) onto every INSTANCE node.
+ * `remote`/`native` on component sets and set-less components are scratch
+ * state for this resolution only — the only copy that survives into the
+ * output lives on the node, since consumers read the tree sequentially and a
+ * componentId → componentSet join hundreds of lines away would get missed.
+ * The library file's own name is resolved purely to make that one boolean
+ * decision — it's never persisted anywhere; once native/custom is decided,
+ * the name string itself has nothing left to add downstream.
  *
  * This replaces the old name→NSClass guessing table (design-hints.ts): the
  * library is ground truth the designer can't accidentally break by renaming
@@ -116,29 +151,45 @@ function isAppleMacosLibrary(libraryName: string): boolean {
  * remote key, plus one /files/:key/meta call per unique library file
  * (typically 1-2). All best-effort — an unpublished key or missing library
  * access logs and leaves the component unstamped (treated as custom).
- *
- * The per-node copy exists because consumers read the tree sequentially — a
- * fact that requires a componentId → componentSet join hundreds of lines
- * away gets missed.
  */
 export async function resolveComponentLibraries(
   design: SimplifiedDesign,
   figmaService: FigmaService,
-): Promise<void> {
+): Promise<Map<string, VariantSetTarget>> {
   const remoteSets = Object.values(design.componentSets).filter((s) => s.remote);
   // Components inside a set inherit the set's library; only set-less
   // components need their own lookup.
   const looseComponents = Object.values(design.components).filter(
     (c) => c.remote && !c.componentSetId,
   );
-  if (remoteSets.length === 0 && looseComponents.length === 0) return;
+  if (remoteSets.length === 0 && looseComponents.length === 0) return new Map();
 
+  // `remote` (read above) and `native` (stamped below) are working state for
+  // this function alone — strip both before returning so neither ever
+  // reaches the output; only the per-node stamp is meant to be visible.
+  const stripWorkingState = (): void => {
+    for (const set of Object.values(design.componentSets)) {
+      delete set.remote;
+      delete set.native;
+    }
+    for (const component of Object.values(design.components)) {
+      delete component.remote;
+      delete component.native;
+    }
+  };
+
+  // node_id (alongside file_key) is captured because the variant-cache pass
+  // needs the set's own node in its source library to fetch its full variant
+  // set — the same resolution that decides native/custom already returns it,
+  // so capturing it here avoids a second round of getComponentSetByKey calls.
   const fileKeyByComponentKey = new Map<string, string>();
+  const nodeIdByComponentKey = new Map<string, string>();
   await Promise.all([
     ...[...new Set(remoteSets.map((s) => s.key))].map(async (key) => {
       try {
         const res = await figmaService.getComponentSetByKey(key);
         fileKeyByComponentKey.set(key, res.meta.file_key);
+        if (res.meta.node_id) nodeIdByComponentKey.set(key, res.meta.node_id);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         Logger.log(`Could not resolve component set ${key} to a library: ${message}`);
@@ -168,32 +219,72 @@ export async function resolveComponentLibraries(
     }),
   );
 
-  const stampNative = (target: { native?: boolean }, componentKey: string): void => {
+  // Classify each remote set by its SOURCE LIBRARY NAME (ground truth from
+  // getFileMeta above — never guessed from the component's own layer name):
+  //   Apple's macOS kit    -> native (map to NS*; keep variantOptions + props)
+  //   Sheet Icons Library  -> icon   (no fetch, no variant list, strip props;
+  //                                    the icon asset on the node is all that matters)
+  //   anything else remote -> custom (fetch its variant UI)
+  const libraryOf = (componentKey: string): string | undefined => {
     const fileKey = fileKeyByComponentKey.get(componentKey);
-    const library = fileKey ? libraryNameByFileKey.get(fileKey) : undefined;
-    if (library && isAppleMacosLibrary(library)) target.native = true;
+    return fileKey ? libraryNameByFileKey.get(fileKey) : undefined;
   };
-  for (const set of remoteSets) stampNative(set, set.key);
-  for (const component of looseComponents) stampNative(component, component.key);
+  const iconLibrarySetIds = new Set<string>();
+  for (const [setId, set] of Object.entries(design.componentSets)) {
+    if (!set.remote) continue;
+    const library = libraryOf(set.key);
+    if (!library) continue;
+    if (isAppleMacosLibrary(library)) set.native = true;
+    else if (isIconLibrary(library)) iconLibrarySetIds.add(setId);
+  }
+  for (const component of looseComponents) {
+    const library = libraryOf(component.key);
+    if (library && isAppleMacosLibrary(library)) component.native = true;
+  }
 
   const nativeComponentIds = new Set<string>();
+  const iconComponentIds = new Set<string>();
   for (const [componentId, component] of Object.entries(design.components)) {
-    const origin = component.componentSetId
-      ? design.componentSets[component.componentSetId]
-      : component;
+    const setId = component.componentSetId;
+    const origin = setId ? design.componentSets[setId] : component;
     if (origin?.native) nativeComponentIds.add(componentId);
+    if (setId && iconLibrarySetIds.has(setId)) iconComponentIds.add(componentId);
   }
-  if (nativeComponentIds.size === 0) return;
 
-  const visit = (nodes: SimplifiedNode[]): void => {
-    for (const node of nodes) {
-      if (node.componentId && nativeComponentIds.has(node.componentId)) {
-        node.native = true;
+  if (nativeComponentIds.size > 0 || iconComponentIds.size > 0) {
+    const visit = (nodes: SimplifiedNode[]): void => {
+      for (const node of nodes) {
+        if (node.componentId) {
+          if (nativeComponentIds.has(node.componentId)) node.native = true;
+          // Icon-library instance: strip componentProperties (Size/Colored
+          // variant noise) — the icon asset on the node is the real content.
+          if (iconComponentIds.has(node.componentId)) delete node.componentProperties;
+        }
+        if (node.children) visit(node.children);
       }
-      if (node.children) visit(node.children);
-    }
-  };
-  visit(design.nodes);
+    };
+    visit(design.nodes);
+  }
+
+  // Variant-fetch targets: one per remote SET, EXCLUDING icon-library sets
+  // (no fetch and no variant-doc entry for them at all). Loose components
+  // aren't variant families. `source` absent = key resolution failed (skip).
+  const targets = new Map<string, VariantSetTarget>();
+  for (const [setId, set] of Object.entries(design.componentSets)) {
+    if (!set.remote || iconLibrarySetIds.has(setId)) continue;
+    const fileKey = fileKeyByComponentKey.get(set.key);
+    const nodeId = nodeIdByComponentKey.get(set.key);
+    targets.set(setId, {
+      setId,
+      name: set.name,
+      publishKey: set.key,
+      native: set.native === true,
+      source: fileKey && nodeId ? { fileKey, nodeId } : undefined,
+    });
+  }
+
+  stripWorkingState();
+  return targets;
 }
 
 /**
@@ -469,16 +560,9 @@ export function renderNameSearchListing(query: string, matches: NameSearchMatch[
  * here.
  *
  * The resource's `name` is free text — Figma has no concept of "kind" for
- * it — so the design team's naming CONVENTION is what gives it structure:
- * underscore-separated scope, outermost to innermost —
- *   "ClassName"                                → the type itself
- *   "ClassName_variableName"                   → a property inside it
- *   "ClassName_functionName_variableName"      → a variable inside a method
- *   "functionName_variableName"                → variable inside a free function (no class)
- * Split into `scopePath` (only when the name actually has an underscore —
- * a plain single name has no path to add). Consumers should resolve
- * scopePath progressively: find the outermost element, then search inside
- * it for the next, and so on; the last element is the exact declaration.
+ * it. Whatever the designer typed is taken verbatim as `symbol`, the Swift
+ * class name this node is implemented by. No decomposition: the entire name
+ * is the class name, even if it contains underscores.
  *
  * A dev resource whose link is itself a Figma design URL (rather than a
  * .swift path) is treated as a component-variant reference instead — see
@@ -609,7 +693,7 @@ interface DevResourceLink {
   node_id: string;
 }
 
-type ImplementedByEntry = { file: string; symbol: string; scopePath?: string[] };
+type ImplementedByEntry = { file: string; symbol: string };
 type VariantLinkTarget = { fileKey: string; nodeId: string };
 
 /**
@@ -630,11 +714,9 @@ function parseDevResourceLinks(resources: DevResourceLink[]): {
   for (const resource of resources) {
     if (resource.url.toLowerCase().endsWith(".swift")) {
       const entries = implementationsByNodeId.get(resource.node_id) ?? [];
-      const parts = resource.name.split("_").filter(Boolean);
       entries.push({
         file: resource.url.replace(/^https?:\/\//i, ""),
         symbol: resource.name,
-        ...(parts.length > 1 ? { scopePath: parts } : {}),
       });
       implementationsByNodeId.set(resource.node_id, entries);
       continue;
@@ -890,6 +972,22 @@ function loadPromptMarkdown(filename: string): string {
 }
 
 /**
+ * The icon-download script's own source, read fresh from the package's
+ * `assets/` directory (ships alongside `prompts/`, listed in package.json's
+ * `files`) and handed to the consumer as a response content block — never
+ * assumed to already exist in whatever repo the agent happens to be working
+ * in. This server is a self-contained unit; a static path like
+ * `native/download_icons.py` only works by coincidence when the consuming
+ * repo happens to already have that exact file, which breaks the moment this
+ * MCP is pointed at a different project. Shipping the source with every
+ * relevant response means the agent always has a current copy, with zero
+ * setup, regardless of which repo it's operating in.
+ */
+export function loadIconDownloadScript(): string {
+  return readFileSync(join(PACKAGE_ROOT, "assets", "download_icons.py"), "utf8");
+}
+
+/**
  * Consumption rules that hold regardless of output format — shared between
  * the per-response embedded guide (design.guide, works with every MCP
  * client) and the server's MCP `instructions` (sent once at session init,
@@ -906,9 +1004,9 @@ export const CONSUMPTION_GUIDE: readonly string[] = parseMarkdownRules(
 
 /** Describes where a design-token fill/stroke resolves to — differs by output format (see native-json.ts). */
 const TOKEN_INDIRECTION_NATIVE =
-  "fills/strokes with snake_case names are design tokens, inlined in place as { token, values, themed, appkit? } — no lookup elsewhere in the document. themed: true means the design defines different Light and Dark values — but per the LIGHT THEME ONLY rule below, implement the Light value (values.Light); values.Dark is reference data, not something to build. appkit, when present, means this token is a material/vibrancy effect (NSVisualEffectView.Material.*), not a flat color — build it as such; absent means it's a plain color, use the Light value directly (a suggested NSColor name is deliberately not included there, since Light Theme Only already overrides it). approx: true means the token name was inferred by color match (the bound variable's ID wasn't in the local token exports) — treat it as a best guess and verify against the design, because the API's color snapshot for a variable-bound fill can lag the variable's live value.";
+  "fills/strokes with snake_case names are design tokens, inlined in place as { token, values, themed, appkit? } — no lookup elsewhere in the document. Every token here is an EXACT variable-ID match against the design-system exports (no color-guessing), so the name is trustworthy. themed: true means the design defines different Light and Dark values — but per the LIGHT THEME ONLY rule below, implement the Light value (values.Light); values.Dark is reference data, not something to build. appkit, when present, means this token is a material/vibrancy effect (NSVisualEffectView.Material.*), not a flat color — build it as such; absent means it's a plain color, use the Light value directly (a suggested NSColor name is deliberately not included there, since Light Theme Only already overrides it). A raw hex/rgba fill (not a token name) is a color with no design-system name — see the unnamedAssets list, don't hardcode it silently.";
 const TOKEN_INDIRECTION_REF =
-  "fills/strokes with snake_case names are design tokens — per-mode values under globalVars.tokens[name]. themed: true means the design defines different Light and Dark values — but per the LIGHT THEME ONLY rule below, implement the Light value (values.Light); values.Dark is reference data, not something to build. appkit, when present, means this token is a material/vibrancy effect (NSVisualEffectView.Material.*), not a flat color — build it as such; absent means it's a plain color, use the Light value directly. approx: true means the token name was inferred by color match (the bound variable's ID wasn't in the local token exports) — treat it as a best guess and verify against the design, because the API's color snapshot for a variable-bound fill can lag the variable's live value.";
+  "fills/strokes with snake_case names are design tokens — per-mode values under globalVars.tokens[name]. Every token is an EXACT variable-ID match against the design-system exports (no color-guessing), so the name is trustworthy. themed: true means the design defines different Light and Dark values — but per the LIGHT THEME ONLY rule below, implement the Light value (values.Light); values.Dark is reference data, not something to build. appkit, when present, means this token is a material/vibrancy effect (NSVisualEffectView.Material.*), not a flat color — build it as such; absent means it's a plain color, use the Light value directly. A raw hex/rgba fill (not a token name) is a color with no design-system name — see the unnamedAssets list, don't hardcode it silently.";
 
 /**
  * Project directive: how to behave when using this MCP, not how to parse its
@@ -929,6 +1027,11 @@ export const PROJECT_DIRECTIVE: readonly string[] = parseMarkdownRules(
  * Embed consumption rules into the output itself. These correct the known
  * ways downstream code-generating consumers misread this format; they must
  * live in the document because the consumer usually has nothing else.
+ *
+ * variantData/unnamedAssets guidance lives as static rules in
+ * project-directive.md ("Component Variants", "Unnamed Assets") rather than
+ * conditionally injected here — same treatment as componentVariantReferences,
+ * which has always described its own "when present" case as a permanent rule.
  */
 export function addConsumptionGuide(design: SimplifiedDesign, outputFormat: OutputFormat): void {
   const tokenRule = outputFormat.startsWith("native-")

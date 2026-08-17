@@ -34,7 +34,7 @@ async function resolveOne(name: string, url: string) {
 }
 
 describe("attachDevResources", () => {
-  it("a plain class name gets no scopePath — symbol names the whole type", async () => {
+  it("takes the whole resource name as the symbol (the class name)", async () => {
     const result = await resolveOne(
       "ZSDialogWindow",
       "https://native/Pods/ZSMacUIFramework/native/ZSSheetUIFramework/SheetView/DialogBox/ZSDialogWindow.swift",
@@ -47,7 +47,7 @@ describe("attachDevResources", () => {
     ]);
   });
 
-  it("ClassName_variableName splits into a 2-element scopePath", async () => {
+  it("keeps an underscored name verbatim as the symbol — no decomposition", async () => {
     const result = await resolveOne(
       "ZSDialogWindow_isEditable",
       "https://native/ZSDialogWindow.swift",
@@ -56,22 +56,9 @@ describe("attachDevResources", () => {
       {
         file: "native/ZSDialogWindow.swift",
         symbol: "ZSDialogWindow_isEditable",
-        scopePath: ["ZSDialogWindow", "isEditable"],
       },
     ]);
-  });
-
-  it("ClassName_functionName_variableName splits into a 3-element scopePath", async () => {
-    const result = await resolveOne(
-      "ZSDialogWindow_handleSave_isEditable",
-      "https://native/ZSDialogWindow.swift",
-    );
-    expect(result![0].scopePath).toEqual(["ZSDialogWindow", "handleSave", "isEditable"]);
-  });
-
-  it("functionName_variableName (no class) still splits correctly", async () => {
-    const result = await resolveOne("handleSave_isEditable", "https://native/Helpers.swift");
-    expect(result![0].scopePath).toEqual(["handleSave", "isEditable"]);
+    expect(result![0]).not.toHaveProperty("scopePath");
   });
 
   it("drops any link that does not end in .swift entirely (no field added)", async () => {

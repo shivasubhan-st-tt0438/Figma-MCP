@@ -7,18 +7,12 @@ import { CONSUMPTION_GUIDE, PROJECT_DIRECTIVE } from "../services/enrich-design.
 import { installValidationRejectCapture } from "./validation-capture.js";
 import type { ToolExtra } from "./progress.js";
 import {
-  downloadFigmaImagesTool,
   getFigmaDataTool,
-  writeImagesetTool,
-  writeColorsetTool,
   getFigmaCommentsTool,
   getFigmaVersionsTool,
   getRenderUrlsTool,
   getFigmaVariablesTool,
-  type DownloadImagesParams,
   type GetFigmaDataParams,
-  type WriteImagesetToolParams,
-  type WriteColorsetToolParams,
   type GetFigmaCommentsParams,
   type GetFigmaVersionsParams,
   type GetRenderUrlsParams,
@@ -53,22 +47,12 @@ type ServerTransport = Extract<Transport, "stdio" | "http">;
 export type CreateServerOptions = {
   transport: ServerTransport;
   outputFormat?: OutputFormat;
-  skipImageDownloads?: boolean;
-  imageDir?: string;
   colorTokensDir?: string;
-  pruneRejectedIcons?: boolean;
 };
 
 function createServer(
   authOptions: FigmaAuthOptions,
-  {
-    transport,
-    outputFormat = "native-yaml",
-    skipImageDownloads = false,
-    imageDir,
-    colorTokensDir,
-    pruneRejectedIcons = false,
-  }: CreateServerOptions,
+  { transport, outputFormat = "native-yaml", colorTokensDir }: CreateServerOptions,
 ) {
   const server = new McpServer(serverInfo, { instructions: serverInstructions });
   const figmaService = new FigmaService(authOptions);
@@ -84,10 +68,7 @@ function createServer(
     transport,
     authMode: mode,
     outputFormat,
-    skipImageDownloads,
-    imageDir,
     colorTokensDir,
-    pruneRejectedIcons,
     getClientInfo,
   });
 
@@ -107,10 +88,7 @@ type RegisterToolsOptions = {
   transport: ServerTransport;
   authMode: AuthMode;
   outputFormat: OutputFormat;
-  skipImageDownloads: boolean;
-  imageDir?: string;
   colorTokensDir?: string;
-  pruneRejectedIcons?: boolean;
   getClientInfo: () => ClientInfo | undefined;
 };
 
@@ -137,7 +115,6 @@ function registerTools(
         options.getClientInfo(),
         extra,
         options.colorTokensDir,
-        options.pruneRejectedIcons,
       ),
   );
 
@@ -184,52 +161,6 @@ function registerTools(
     },
     (params: GetFigmaVariablesParams) => getFigmaVariablesTool.handler(params, figmaService),
   );
-
-  if (!options.skipImageDownloads) {
-    server.registerTool(
-      downloadFigmaImagesTool.name,
-      {
-        title: "Download Figma Images",
-        description: downloadFigmaImagesTool.getDescription(options.imageDir),
-        inputSchema: downloadFigmaImagesTool.parametersSchema,
-        annotations: { openWorldHint: true },
-      },
-      (params: DownloadImagesParams, extra: ToolExtra) =>
-        downloadFigmaImagesTool.handler(
-          params,
-          figmaService,
-          options.imageDir,
-          options.transport,
-          options.authMode,
-          options.getClientInfo(),
-          extra,
-        ),
-    );
-
-    server.registerTool(
-      writeImagesetTool.name,
-      {
-        title: "Write Imageset",
-        description: writeImagesetTool.description,
-        inputSchema: writeImagesetTool.parametersSchema,
-        annotations: { openWorldHint: true },
-      },
-      (params: WriteImagesetToolParams, extra: ToolExtra) =>
-        writeImagesetTool.handler(params, figmaService, extra),
-    );
-
-    server.registerTool(
-      writeColorsetTool.name,
-      {
-        title: "Write Colorset",
-        description: writeColorsetTool.description,
-        inputSchema: writeColorsetTool.parametersSchema,
-        annotations: { openWorldHint: true },
-      },
-      (params: WriteColorsetToolParams, extra: ToolExtra) =>
-        writeColorsetTool.handler(params, extra),
-    );
-  }
 }
 
 export { createServer };

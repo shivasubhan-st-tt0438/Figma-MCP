@@ -71,16 +71,14 @@ describe("validation reject capture (monkey patch)", () => {
   });
 
   it("normalizes array indexes to [] in nested validation_field", async () => {
-    // download_figma_images.nodes[0].nodeId fails the nodeId regex.
+    // get_figma_data.targets[1].fileKey fails the fileKey regex.
     const result = await client.request(
       {
         method: "tools/call",
         params: {
-          name: "download_figma_images",
+          name: "get_figma_data",
           arguments: {
-            fileKey: "abc123",
-            nodes: [{ nodeId: "BAD!!!", fileName: "x.png" }],
-            localPath: "images",
+            targets: [{ fileKey: "abc123" }, { fileKey: "BAD!!!" }],
           },
         },
       },
@@ -91,10 +89,10 @@ describe("validation reject capture (monkey patch)", () => {
     const captureSpy = vi.mocked(telemetry.captureValidationReject);
     expect(captureSpy).toHaveBeenCalledOnce();
     const [input] = captureSpy.mock.calls[0];
-    expect(input.tool).toBe("download_figma_images");
-    // The literal index 0 should be collapsed so `nodes.0.nodeId` doesn't
+    expect(input.tool).toBe("get_figma_data");
+    // The literal index 1 should be collapsed so `targets.1.fileKey` doesn't
     // appear with high cardinality in PostHog.
-    expect(input.field).toBe("nodes[].nodeId");
+    expect(input.field).toBe("targets[].fileKey");
   });
 
   it("does not capture validation rejects on successful tool calls", async () => {

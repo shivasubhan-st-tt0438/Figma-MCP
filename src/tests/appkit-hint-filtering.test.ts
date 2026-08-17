@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { resolveVariableFillNames } from "~/services/resolve-variable-names.js";
 import type { SimplifiedDesign } from "~/extractors/types.js";
-import type { FigmaService } from "~/services/figma.js";
 import type { ColorTokensByMode } from "~/services/color-tokens-file.js";
 
 function makeDesign(): SimplifiedDesign {
@@ -27,31 +26,21 @@ function makeLocalTokens(path: string, variableId: string): ColorTokensByMode {
   return { Light: { byVariableId: new Map([[variableId, token]]), all: [token] } };
 }
 
-const noOpService = {} as FigmaService;
-
 describe("resolveVariableFillNames — appkit hint filtering", () => {
-  it("drops a plain NSColor.* hint — redundant with Light Theme Only, sometimes misleading", async () => {
+  it("drops a plain NSColor.* hint — redundant with Light Theme Only, sometimes misleading", () => {
     const design = makeDesign();
-    await resolveVariableFillNames(
-      design,
-      noOpService,
-      "f",
-      makeLocalTokens("text_primary", "VariableID:123"),
-      { text_primary: "NSColor.labelColor" },
-    );
+    resolveVariableFillNames(design, makeLocalTokens("text_primary", "VariableID:123"), {
+      text_primary: "NSColor.labelColor",
+    });
 
     expect(design.globalVars.tokens?.text_primary?.appkit).toBeUndefined();
   });
 
-  it("keeps a Material/VisualEffect hint — the only signal this token isn't a flat color", async () => {
+  it("keeps a Material/VisualEffect hint — the only signal this token isn't a flat color", () => {
     const design = makeDesign();
-    await resolveVariableFillNames(
-      design,
-      noOpService,
-      "f",
-      makeLocalTokens("materials_ultrathick", "VariableID:123"),
-      { materials_ultrathick: "NSVisualEffectView.Material.sheet (ultra thick)" },
-    );
+    resolveVariableFillNames(design, makeLocalTokens("materials_ultrathick", "VariableID:123"), {
+      materials_ultrathick: "NSVisualEffectView.Material.sheet (ultra thick)",
+    });
 
     expect(design.globalVars.tokens?.materials_ultrathick?.appkit).toBe(
       "NSVisualEffectView.Material.sheet (ultra thick)",
