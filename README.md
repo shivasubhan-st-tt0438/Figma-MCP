@@ -55,7 +55,17 @@ pnpm start
 # same as: node dist/bin.js
 ```
 
-One running process — any number of MCP clients connect to it over HTTP, whether they're on this same machine or elsewhere on the LAN.
+### Or: running a build someone already shared with you
+
+If you received a folder that already has `dist/` in it (someone else ran `pnpm build` and handed you the output, instead of you cloning the source) — skip Install and Build entirely:
+
+1. Install Node.js ≥ 20.20.0 if it isn't already ([nodejs.org](https://nodejs.org)).
+2. If the folder has no `node_modules/`, install dependencies once: `npm install --omit=dev` (run inside that folder). If it already includes `node_modules/`, you can normally use it.
+3. Make sure `.env` exists in that folder with at least `FIGMA_API_KEY` set (see [Configure](#configure) above).
+4. Run it — same command either way:
+   ```bash
+   node dist/bin.js
+   ```
 
 ## Connect an MCP client
 
