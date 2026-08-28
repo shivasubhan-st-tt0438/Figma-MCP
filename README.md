@@ -1,95 +1,108 @@
-<a href="https://www.framelink.ai/?utm_source=github&utm_medium=referral&utm_campaign=readme" target="_blank" rel="noopener">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://www.framelink.ai/github/HeaderDark.png" />
-    <img alt="Framelink" src="https://www.framelink.ai/github/HeaderLight.png" />
-  </picture>
-</a>
+# Figma MCP
 
-<div align="center">
-  <h1>Framelink MCP for Figma</h1>
-  <h3>Give your coding agent access to your Figma data.<br/>Implement designs in any framework in one-shot.</h3>
-  <a href="https://npmcharts.com/compare/figma-developer-mcp?interval=30">
-    <img alt="weekly downloads" src="https://img.shields.io/npm/dm/figma-developer-mcp.svg">
-  </a>
-  <a href="https://github.com/GLips/Figma-Context-MCP/blob/main/LICENSE">
-    <img alt="MIT License" src="https://img.shields.io/github/license/GLips/Figma-Context-MCP" />
-  </a>
-  <a href="https://framelink.ai/discord">
-    <img alt="Discord" src="https://img.shields.io/discord/1352337336913887343?color=7389D8&label&logo=discord&logoColor=ffffff" />
-  </a>
-  <br />
-  <a href="https://twitter.com/glipsman">
-    <img alt="Twitter" src="https://img.shields.io/twitter/url?url=https%3A%2F%2Fx.com%2Fglipsman&label=%40glipsman" />
-  </a>
-</div>
+A [Model Context Protocol](https://modelcontextprotocol.io/introduction) server that gives an AI coding agent access to Figma design data — layout, styling, components, and content — so it can implement a design directly instead of working from a screenshot or a description.
 
-<br/>
+This is a customized fork of the Framelink Figma MCP, tuned for one thing: feeding Figma design data to an AI agent implementing a native macOS AppKit app. It is **not** the public `figma-developer-mcp` npm package — don't `npx` it, run it from this repo.
 
-Give [Cursor](https://cursor.sh/) and other AI-powered coding tools access to your Figma files with this [Model Context Protocol](https://modelcontextprotocol.io/introduction) server.
+## Prerequisites
 
-When Cursor has access to Figma design data, it's **way** better at one-shotting designs accurately than alternative approaches like pasting screenshots.
+- **Node.js ≥ 20.20.0** ([nodejs.org](https://nodejs.org))
+- **pnpm** (`npm install -g pnpm`)
+- **A Figma Personal Access Token** — [create one here](https://help.figma.com/hc/en-us/articles/8085703771159-Manage-personal-access-tokens). It needs `File content: Read` and `Dev resources: Read` scopes.
 
-<h3><a href="https://www.framelink.ai/docs/quickstart?utm_source=github&utm_medium=referral&utm_campaign=readme">See quickstart instructions →</a></h3>
+## Install
 
-## Demo
+```bash
+git clone <this-repo-url>
+cd Figma-MCP
+pnpm install
+```
 
-[Watch a demo of building a UI in Cursor with Figma design data](https://youtu.be/6G9yb-LrEqg)
+## Configure
 
-[![Watch the video](https://img.youtube.com/vi/6G9yb-LrEqg/maxresdefault.jpg)](https://youtu.be/6G9yb-LrEqg)
+Copy `.env.example` to `.env` (or create `.env` directly) and set at minimum:
 
-## How it works
+```bash
+FIGMA_API_KEY=your_figma_personal_access_token
+```
 
-1. Open your IDE's chat (e.g. agent mode in Cursor).
-2. Paste a link to a Figma file, frame, or group.
-3. Ask Cursor to do something with the Figma file—e.g. implement the design.
-4. Cursor will fetch the relevant metadata from Figma and use it to write your code.
+Everything else has a working default. The full set of options — all can also be passed as CLI flags instead (`--figma-api-key`, `--port`, `--format`, etc. — run `node dist/bin.js --help` after building):
 
-This MCP server is specifically designed for use with Cursor. Before responding with context from the [Figma API](https://www.figma.com/developers/api), it simplifies and translates the response so only the most relevant layout and styling information is provided to the model.
+| Variable                          | Default       | Purpose                                                                                                                                            |
+| --------------------------------- | ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `FIGMA_API_KEY`                   | —             | Your Figma Personal Access Token (required unless using `FIGMA_OAUTH_TOKEN`)                                                                       |
+| `PORT`                            | `3333`        | HTTP server port                                                                                                                                   |
+| `FRAMELINK_HOST`                  | `127.0.0.1`   | Bind address — set `0.0.0.0` to accept connections from other machines, not just this one                                                          |
+| `FIGMA_PROXY`                     | —             | HTTP proxy URL, or `none` to bypass any `HTTP_PROXY`/`HTTPS_PROXY` already set in the environment                                                  |
+| `OUTPUT_FORMAT`                   | `native-yaml` | `native-yaml` / `native-json` (compact, fully-inlined) or the legacy `yaml` / `json` / `tree`                                                      |
+| `FIGMA_COLOR_TOKENS_DIR`          | —             | Directory of DTCG color-token JSON exports (e.g. `Light.tokens.json`) used to resolve Figma Variable-bound fills to real design-system color names |
+| `FIGMA_MCP_FETCH_VARIANTS`        | `false`       | Whether a fetch also pulls each remote component's full variant UI into a second document (costs an extra API call per new component set)          |
+| `FIGMA_MCP_NATIVE_LIBRARY_PREFIX` | `macos`       | Slugified name prefix that identifies your platform's own native UI kit library, vs. a custom one                                                  |
+| `FIGMA_MCP_VARIANT_CACHE_DIR`     | OS temp dir   | Where fetched variant data is cached (only relevant if `FIGMA_MCP_FETCH_VARIANTS=true`)                                                            |
 
-Reducing the amount of context provided to the model helps make the AI more accurate and the responses more relevant.
+## Build
 
-## Getting Started
+```bash
+pnpm build
+```
 
-Many code editors and other AI clients use a configuration file to manage MCP servers.
+Compiles `src/` to `dist/` via `tsup`. Re-run this after pulling any code change.
 
-The `figma-developer-mcp` server can be configured by adding the following to your configuration file.
+## Run
 
-> NOTE: You will need to create a Figma access token to use this server. Instructions on how to create a Figma API access token can be found [here](https://help.figma.com/hc/en-us/articles/8085703771159-Manage-personal-access-tokens).
+```bash
+pnpm start
+# same as: node dist/bin.js
+```
 
-### MacOS / Linux
+One running process — any number of MCP clients connect to it over HTTP, whether they're on this same machine or elsewhere on the LAN.
+
+## Connect an MCP client
+
+Use `localhost` for the URL when the client is on the same machine as the running server, or that machine's LAN IP (e.g. `192.168.x.x`) when connecting from a different machine — never both, and never `0.0.0.0` (that's a bind address, not something you can connect _to_).
+
+### Cursor
+
+Cursor Settings → MCP → "Add new global MCP server" (or create `.cursor/mcp.json` in the project root instead of `~/.cursor/mcp.json` for a project-scoped one):
 
 ```json
 {
   "mcpServers": {
-    "Framelink MCP for Figma": {
-      "command": "npx",
-      "args": ["-y", "figma-developer-mcp", "--figma-api-key=YOUR-KEY", "--stdio"]
+    "figma": {
+      "url": "http://localhost:3333/mcp"
     }
   }
 }
 ```
 
-### Windows
+Reload the MCP servers list in Cursor's MCP settings panel afterward — `figma` should show connected with a green dot.
+
+### Claude Code
+
+```bash
+claude mcp add --transport http figma http://localhost:3333/mcp
+```
+
+Writes to `.mcp.json` (project-scoped, shareable via git) or `~/.claude.json` (user-scoped) for you — no manual JSON needed. Verify with `claude mcp list`; inside a session, `/mcp` shows live status.
+
+### VS Code
+
+Create `.vscode/mcp.json` in the project root:
 
 ```json
 {
-  "mcpServers": {
-    "Framelink MCP for Figma": {
-      "command": "cmd",
-      "args": ["/c", "npx", "-y", "figma-developer-mcp", "--figma-api-key=YOUR-KEY", "--stdio"]
+  "servers": {
+    "figma": {
+      "type": "http",
+      "url": "http://localhost:3333/mcp"
     }
   }
 }
 ```
 
-Or you can set `FIGMA_API_KEY` and `PORT` in the `env` field.
+VS Code picks this up the next time you open a Copilot Chat/agent session in this project — note the `"servers"` key and required `"type"`, both different from Cursor/Claude Code's `"mcpServers"` shape.
 
-If you need more information on how to configure the Framelink MCP for Figma, see the [Framelink docs](https://www.framelink.ai/docs/quickstart?utm_source=github&utm_medium=referral&utm_campaign=readme).
+## Learn more
 
-## Star History
-
-<a href="https://star-history.com/#GLips/Figma-Context-MCP"><img src="https://api.star-history.com/svg?repos=GLips/Figma-Context-MCP&type=Date" alt="Star History Chart" width="600" /></a>
-
-## Learn More
-
-The Framelink MCP for Figma is simple but powerful. Get the most out of it by learning more at the [Framelink](https://framelink.ai?utm_source=github&utm_medium=referral&utm_campaign=readme) site.
+- [`prompts/project-directive.md`](prompts/project-directive.md) — the rules embedded in every response, guiding how an agent should use the fetched data
+- [`prompts/consumption-guide.md`](prompts/consumption-guide.md) — how to read the compact output format itself
