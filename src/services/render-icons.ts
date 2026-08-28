@@ -26,24 +26,46 @@ import { Logger } from "~/utils/logger.js";
  * enrichment pass: a render failure — or a node Figma won't export on its own
  * (its URL comes back null, e.g. some deeply-nested native-library
  * instance-internal nodes) — logs and leaves that node unstamped. Never throws.
+ *
+ * Returns the number of icons actually stamped (0 if there were none, or the
+ * render call failed) — callers use this to skip attaching anything
+ * icon-related (e.g. the download_icons.py script) to a response that has
+ * nothing to download.
  */
+// Not enabled yet: the design system's known icon-name prefixes. Uncomment
+// the allowlist check below (in the visit walker) to reject any IMAGE-SVG
+// node whose name doesn't start with one of these.
+// const ALLOWED_ICON_NAME_PREFIXES = [
+//   "ic_",
+//   "control_",
+//   "cursor_",
+//   "es_",
+//   "style_",
+//   "logo_",
+//   "ext_",
+//   "fileicon_",
+// ];
+
 export async function collectIconRenderUrls(
   design: SimplifiedDesign,
   figmaService: FigmaService,
   fileKey: string,
-): Promise<void> {
+): Promise<number> {
   const iconNodes: SimplifiedNode[] = [];
   const visit = (nodes: SimplifiedNode[], insideNative: boolean): void => {
     for (const node of nodes) {
       const stillInsideNative = insideNative || node.native === true;
       if (node.type === "IMAGE-SVG" && !stillInsideNative) {
+        // Not enabled yet: uncomment to reject icons whose name doesn't
+        // start with one of the design system's known icon-name prefixes.
+        // if (!ALLOWED_ICON_NAME_PREFIXES.some((prefix) => node.name.startsWith(prefix))) continue;
         iconNodes.push(node);
       }
       if (node.children) visit(node.children, stillInsideNative);
     }
   };
   visit(design.nodes, false);
-  if (iconNodes.length === 0) return;
+  if (iconNodes.length === 0) return 0;
 
   let urls: Record<string, string>;
   try {
@@ -55,7 +77,7 @@ export async function collectIconRenderUrls(
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     Logger.log(`Skipping icon render URLs (${iconNodes.length} icons): ${message}`);
-    return;
+    return 0;
   }
 
   let stamped = 0;
@@ -67,4 +89,5 @@ export async function collectIconRenderUrls(
     }
   }
   Logger.log(`Stamped render URLs on ${stamped}/${iconNodes.length} icon node(s).`);
+  return stamped;
 }

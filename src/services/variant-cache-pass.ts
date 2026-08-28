@@ -81,6 +81,10 @@ export async function attachVariantData(
     // map to NS* and render themselves; icon sets are already excluded from
     // targets upstream).
     const fetchUi = !target.native && Boolean(target.source);
+    // Not enabled yet: uncomment to further restrict UI fetching to only
+    // component sets that follow the design system's "comp_" naming
+    // convention — everything else stays listed via propDefs, UI-less.
+    // const fetchUi = !target.native && Boolean(target.source) && target.name.startsWith("comp_");
     if (fetchUi) {
       toFetch.push(target);
       continue;

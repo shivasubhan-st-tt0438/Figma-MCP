@@ -37,13 +37,14 @@ describe("collectIconRenderUrls", () => {
       },
     ]);
 
-    await collectIconRenderUrls(design, service, "f");
+    const stamped = await collectIconRenderUrls(design, service, "f");
 
     // One batched call for both ids.
     expect(requested).toHaveLength(1);
     expect(requested[0].sort()).toEqual(["1:1", "1:2"]);
     expect(design.nodes[0].iconUrl).toBe("https://figma/render/a.pdf");
     expect(design.nodes[1].iconUrl).toBe("https://figma/render/b.pdf");
+    expect(stamped).toBe(2);
   });
 
   it("renders every IMAGE-SVG regardless of size (no size floor — small icons kept)", async () => {
@@ -131,13 +132,17 @@ describe("collectIconRenderUrls", () => {
       },
     ]);
 
-    await collectIconRenderUrls(design, service, "f");
+    const stamped = await collectIconRenderUrls(design, service, "f");
 
     expect(design.nodes[0].iconUrl).toBe("https://figma/render/a.pdf");
     expect(design.nodes[1].iconUrl).toBeUndefined();
+    // Only the successfully-stamped one counts, not every requested id — this
+    // is exactly the count callers use to decide whether download_icons.py is
+    // worth attaching to the response.
+    expect(stamped).toBe(1);
   });
 
-  it("never calls the render API when there are no IMAGE-SVG nodes", async () => {
+  it("never calls the render API when there are no IMAGE-SVG nodes, and returns 0", async () => {
     const requested: string[][] = [];
     const service = makeService(requested);
     const design = makeDesign([
@@ -149,8 +154,30 @@ describe("collectIconRenderUrls", () => {
       },
     ]);
 
-    await collectIconRenderUrls(design, service, "f");
+    const stamped = await collectIconRenderUrls(design, service, "f");
 
     expect(requested).toHaveLength(0);
+    expect(stamped).toBe(0);
+  });
+
+  it("returns 0 when the render call itself fails (best-effort, never throws)", async () => {
+    const service = {
+      getNodeRenderUrls: vi.fn(async () => {
+        throw new Error("503 Service Unavailable");
+      }),
+    } as unknown as FigmaService;
+    const design = makeDesign([
+      {
+        id: "1:1",
+        name: "icon",
+        type: "IMAGE-SVG",
+        absoluteBoundingBox: { width: 20, height: 20 },
+      },
+    ]);
+
+    const stamped = await collectIconRenderUrls(design, service, "f");
+
+    expect(stamped).toBe(0);
+    expect(design.nodes[0].iconUrl).toBeUndefined();
   });
 });

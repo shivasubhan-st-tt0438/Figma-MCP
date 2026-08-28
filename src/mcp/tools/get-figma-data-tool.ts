@@ -46,6 +46,10 @@ const targetSchema = z.object({
     .boolean()
     .optional()
     .describe("Same as the top-level downloadIcons, scoped to this target."),
+  fetchVariants: z
+    .boolean()
+    .optional()
+    .describe("Same as the top-level fetchVariants, scoped to this target."),
   focusNodeId: focusNodeIdSchema
     .optional()
     .describe("Same as the top-level focusNodeId, scoped to this target."),
@@ -73,6 +77,12 @@ const parameters = {
     .optional()
     .describe(
       "Stamp a downloadable render URL (vector PDF) onto every icon (IMAGE-SVG node, any size) in the fetched/scoped subtree, as each icon node's `icon` field — 'give me links for all the icons here' in one call, no need to list icon node ids yourself. One extra Figma render call, batched for all icons. Recommended when this fetch is for implementing UI. A node Figma can't export alone (rare, e.g. some native-library internals) is left without an `icon` link.",
+    ),
+  fetchVariants: z
+    .boolean()
+    .optional()
+    .describe(
+      "OPTIONAL, rare. The server normally decides whether to fetch each remote component's full variant UI (the second `variantData` document) via its own FIGMA_MCP_FETCH_VARIANTS setting, which defaults to OFF (each new custom set costs an extra cross-file Figma API call). Set true to force that fetch for THIS call only, regardless of the server's default — use only when you actually need to see a component's other variant states (e.g. implementing a state that isn't instantiated anywhere in the current fetch) and the server has the feature off. Never turns it off if the server already has it on.",
     ),
   focusNodeId: focusNodeIdSchema
     .optional()
@@ -113,7 +123,15 @@ async function getFigmaData(
 ) {
   try {
     const parsed = parametersSchema.parse(params);
-    const { nodeId: rawNodeId, depth, downloadIcons, focusNodeId, find, targets } = parsed;
+    const {
+      nodeId: rawNodeId,
+      depth,
+      downloadIcons,
+      fetchVariants,
+      focusNodeId,
+      find,
+      targets,
+    } = parsed;
 
     if (targets && targets.length > 0) {
       if (parsed.fileKey) {
@@ -128,6 +146,7 @@ async function getFigmaData(
           nodeId: t.nodeId?.replace(/-/g, ":"),
           depth: t.depth,
           downloadIcons: t.downloadIcons,
+          fetchVariants: t.fetchVariants,
           focusNodeId: t.focusNodeId,
         })),
         outputFormat,
@@ -203,7 +222,7 @@ async function getFigmaData(
 
     const result = await runGetFigmaData(
       figmaService,
-      { fileKey, nodeId, depth, downloadIcons, focusNodeId, find },
+      { fileKey, nodeId, depth, downloadIcons, fetchVariants, focusNodeId, find },
       outputFormat,
       {
         colorTokensDir,

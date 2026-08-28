@@ -81,20 +81,33 @@ export async function enrichComponentSetDefinitions(
 }
 
 /**
- * Detects Apple's official macOS UI kit Figma libraries across releases
- * ("macOS 15 Sequoia (Library)", "macOS 14 Sonoma", …). Components published
- * from these files ARE stock AppKit controls; everything else is custom.
+ * The slugified prefix that identifies Apple's own platform UI kit (default
+ * "macos", matching "macOS 15 Sequoia (Library)", "macOS 14 Sonoma", …).
+ * Read directly from the environment — like variantCacheDir/variantFetchEnabled
+ * in variant-cache.ts — since it's a server-wide fact about which Figma
+ * library is Apple's kit, not something that varies per request. Overriding
+ * it is for porting this server to a different platform's kit (e.g. an iOS
+ * library named "iOS 18 (Library)"), not a per-fetch concern.
+ */
+function nativeLibraryPrefix(): string {
+  return slugify(process.env.FIGMA_MCP_NATIVE_LIBRARY_PREFIX || "macos");
+}
+
+/**
+ * Detects Apple's official platform UI kit Figma libraries across releases.
+ * Components published from these files ARE stock AppKit controls;
+ * everything else is custom.
  *
- * Matches "macos" at the START of the slugified name (emoji prefixes and
- * parentheticals stripped) — NOT anywhere in it. A bare /macos/i test
- * misclassified the design team's own component library "🧤 UI Content -
- * macOS" as Apple's kit, stamping custom components native: true while
- * their pinned dev resources correctly pointed at custom Swift classes.
- * Apple names its kits with the platform first; team libraries that merely
- * target macOS mention it elsewhere in the name.
+ * Matches the configured prefix at the START of the slugified name (emoji
+ * prefixes and parentheticals stripped) — NOT anywhere in it. A bare
+ * /macos/i test misclassified the design team's own component library
+ * "🧤 UI Content - macOS" as Apple's kit, stamping custom components
+ * native: true while their pinned dev resources correctly pointed at custom
+ * Swift classes. Apple names its kits with the platform first; team
+ * libraries that merely target macOS mention it elsewhere in the name.
  */
 function isAppleMacosLibrary(libraryName: string): boolean {
-  return slugify(libraryName).startsWith("macos");
+  return slugify(libraryName).startsWith(nativeLibraryPrefix());
 }
 
 /**

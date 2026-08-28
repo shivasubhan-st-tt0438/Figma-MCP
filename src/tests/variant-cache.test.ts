@@ -2,7 +2,11 @@ import { afterEach, describe, expect, it } from "vitest";
 import { existsSync, mkdtempSync, readdirSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
-import { openVariantCache, variantCacheStem } from "~/services/variant-cache.js";
+import {
+  openVariantCache,
+  variantCacheStem,
+  variantFetchEnabled,
+} from "~/services/variant-cache.js";
 
 const roots: string[] = [];
 function tmpRoot(): string {
@@ -28,6 +32,27 @@ describe("variantCacheStem", () => {
   it("falls back to the id alone when the name slugs to nothing", () => {
     expect(variantCacheStem("", "121:12408")).toBe("121_12408");
     expect(variantCacheStem("✅", "1:2")).toBe("1_2");
+  });
+});
+
+describe("variantFetchEnabled", () => {
+  const original = process.env.FIGMA_MCP_FETCH_VARIANTS;
+  afterEach(() => {
+    if (original === undefined) delete process.env.FIGMA_MCP_FETCH_VARIANTS;
+    else process.env.FIGMA_MCP_FETCH_VARIANTS = original;
+  });
+
+  it("defaults to false when unset", () => {
+    delete process.env.FIGMA_MCP_FETCH_VARIANTS;
+    expect(variantFetchEnabled()).toBe(false);
+  });
+
+  it('is true only for the exact string "true"', () => {
+    process.env.FIGMA_MCP_FETCH_VARIANTS = "true";
+    expect(variantFetchEnabled()).toBe(true);
+
+    process.env.FIGMA_MCP_FETCH_VARIANTS = "1";
+    expect(variantFetchEnabled()).toBe(false);
   });
 });
 

@@ -5,8 +5,7 @@ For Server/Online questions query the user
 
 ## Architecture
 
-AppKit only, never SwiftUI. VIPER for document/module work; MVP ok for
-small self-contained features.Check
+AppKit only, never SwiftUI. VIPER for document/module work; MVP ok for small self-contained features.Check
 `docs/architecture/*.md` before starting UI work .
 
 ## Auto Layout — Anchors
@@ -55,11 +54,12 @@ document
 ## Unnamed Assets
 
 `unnamedAssets` (when present) lists colors/icons/fonts with no
-design-system name. Never hardcode these. Read
-`ColorAndIconFlow.md` first -> the same placement rules
-apply to a temporary asset as a real one. Ask the user to approve THREE
-SEPARATE temporary folders `temp`; a note per font naming the `ZSAppearance`
-typeface it maps to.
+design-system name. Never hardcode these. Read `ColorAndIconFlow.md` first
+-> the same placement rules apply to a temporary asset as a real one. ASK
+THE USER, then place in a `temp` folder -> do not create or write anything
+before they confirm. Once approved: a colorset stub per color; icons via
+`get_render_urls` + `download_icons.py`; a note per font naming the
+`ZSAppearance` typeface it maps to.
 
 ## Custom Component Reuse Check
 
@@ -70,3 +70,6 @@ and reusing it turns out costlier than expected don't unilaterally decide it's n
 one instead. Surface the real friction found and ask the
 user before choosing not to reuse it or better suggest either to restructure
 and globally use that class.
+
+If there's no Dev Resources link at all, that absence is not confirmation
+it's genuinely new — ask the user before starting it as a new component.

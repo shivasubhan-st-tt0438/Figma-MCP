@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { resolveComponentLibraries } from "~/services/enrich-design.js";
 import type { SimplifiedDesign } from "~/extractors/types.js";
 import type { FigmaService } from "~/services/figma.js";
@@ -47,6 +47,24 @@ describe("resolveComponentLibraries — Apple kit vs team library", () => {
     expect(design.nodes[0].native).toBeUndefined();
     expect("native" in design.componentSets["10:1"]).toBe(false);
     expect("remote" in design.componentSets["10:1"]).toBe(false);
+  });
+
+  afterEach(() => {
+    delete process.env.FIGMA_MCP_NATIVE_LIBRARY_PREFIX;
+  });
+
+  it("uses FIGMA_MCP_NATIVE_LIBRARY_PREFIX instead of the default 'macos' when set", async () => {
+    process.env.FIGMA_MCP_NATIVE_LIBRARY_PREFIX = "ios";
+
+    // "macOS 15 Sequoia (Library)" no longer matches once the prefix is "ios".
+    const notNative = makeDesign();
+    await resolveComponentLibraries(notNative, stubService("🟢 macOS 15 Sequoia (Library)"));
+    expect(notNative.nodes[0].native).toBeUndefined();
+
+    // A library named for the configured prefix is now treated as native.
+    const nowNative = makeDesign();
+    await resolveComponentLibraries(nowNative, stubService("🟢 iOS 18 (Library)"));
+    expect(nowNative.nodes[0].native).toBe(true);
   });
 });
 

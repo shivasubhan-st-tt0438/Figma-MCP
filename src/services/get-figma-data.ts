@@ -34,6 +34,7 @@ import {
 } from "~/services/enrich-design.js";
 import { collectIconRenderUrls } from "~/services/render-icons.js";
 import { attachVariantData } from "~/services/variant-cache-pass.js";
+import { variantFetchEnabled } from "~/services/variant-cache.js";
 import { flagUnnamedAssets } from "~/services/flag-unnamed-assets.js";
 import type { SimplifiedDesign } from "~/extractors/types.js";
 
@@ -52,6 +53,18 @@ export type GetFigmaDataInput = {
    * collectIconRenderUrls.
    */
   downloadIcons?: boolean;
+  /**
+   * Force-fetch the full variantData document (every remote component set's
+   * complete variant UI) for THIS call, even when the server's
+   * FIGMA_MCP_FETCH_VARIANTS env gate is off. The env gate exists because the
+   * feature's cost is structural (a cross-file Tier-1 /nodes call per new
+   * custom set) and shouldn't turn on by default for every native-* fetch;
+   * this override lets one call opt in anyway when the variant data is
+   * actually needed, without flipping that server-wide default for every
+   * other request. Only ever widens access (env true, this false still
+   * fetches) — never narrows it.
+   */
+  fetchVariants?: boolean;
   /**
    * Scope the result to just the subtree(s) matching this node id or layer
    * name, dropping all sibling branches — for a huge instance where only one
@@ -140,7 +153,7 @@ export async function getFigmaData(
   outputFormat: OutputFormat,
   hooks: GetFigmaDataHooks = {},
 ): Promise<GetFigmaDataResult> {
-  const { fileKey, nodeId, depth, focusNodeId, find, downloadIcons } = input;
+  const { fileKey, nodeId, depth, focusNodeId, find, downloadIcons, fetchVariants } = input;
   const startedAt = Date.now();
   let metrics: GetFigmaDataMetrics | undefined;
   let caughtError: unknown;
@@ -151,6 +164,7 @@ export async function getFigmaData(
   // Per-call counter shared with the walker. Lives in the call closure so
   // overlapping HTTP requests each have their own — no module-global state.
   const nodeCounter = { count: 0 };
+  let iconsFound = 0;
 
   try {
     await hooks.onFetchStart?.();
@@ -246,8 +260,14 @@ export async function getFigmaData(
         // Runs on the resolved targets from the line above — no extra key
         // lookups. Native formats only: they're the ones that move
         // components/componentSets into the second document; other formats
-        // keep the single-document shape unchanged.
-        if (outputFormat.startsWith("native-")) {
+        // keep the single-document shape unchanged. Also gated on
+        // variantFetchEnabled() OR this call's own fetchVariants override:
+        // every remote custom set costs a cross-file Tier-1 /nodes call the
+        // first time it's seen, so this is opt-in, default-off server
+        // infrastructure — not implied by output format alone. fetchVariants
+        // lets one call opt in without flipping that default for every other
+        // request.
+        if (outputFormat.startsWith("native-") && (variantFetchEnabled() || fetchVariants)) {
           await attachVariantData(simplifiedDesign, variantTargets, figmaService);
         }
         await attachDevResources(simplifiedDesign, figmaService, fileKey);
@@ -259,7 +279,7 @@ export async function getFigmaData(
         // After pruning/focus so we only render icons that survived into the
         // scoped tree — one batched /images call, stamped inline as iconUrl.
         if (downloadIcons) {
-          await collectIconRenderUrls(simplifiedDesign, figmaService, fileKey);
+          iconsFound = await collectIconRenderUrls(simplifiedDesign, figmaService, fileKey);
         }
         // Last, on the final pruned/scoped tree: surface colors/icons/fonts
         // that carry no design-system name.
@@ -323,7 +343,9 @@ export async function getFigmaData(
       formatted,
       metrics,
       variantsFormatted,
-      iconScript: downloadIcons ? loadIconDownloadScript() : undefined,
+      // Only when there's actually something to download — a downloadIcons
+      // fetch that found zero icons has no use for the script.
+      iconScript: iconsFound > 0 ? loadIconDownloadScript() : undefined,
     };
   } catch (error) {
     caughtError = error;
@@ -357,7 +379,8 @@ type TargetProcessingResult = {
   hasVariables: boolean;
   fetchMs: number;
   simplifyMs: number;
-  downloadIcons?: boolean;
+  /** Icons actually stamped (0 if downloadIcons wasn't used, or nothing was found). */
+  iconsFound: number;
 };
 
 /**
@@ -374,7 +397,7 @@ async function fetchAndEnrichTarget(
   outputFormat: OutputFormat,
   hooks: Pick<GetFigmaDataHooks, "colorTokensDir">,
 ): Promise<TargetProcessingResult> {
-  const { fileKey, nodeId, depth, focusNodeId, downloadIcons } = target;
+  const { fileKey, nodeId, depth, focusNodeId, downloadIcons, fetchVariants } = target;
   const nodeCounter = { count: 0 };
 
   const fetchStart = Date.now();
@@ -407,7 +430,7 @@ async function fetchAndEnrichTarget(
   parseVariantProperties(simplifiedDesign);
   await enrichComponentSetDefinitions(simplifiedDesign, figmaService, fileKey);
   const variantTargets = await resolveComponentLibraries(simplifiedDesign, figmaService);
-  if (outputFormat.startsWith("native-")) {
+  if (outputFormat.startsWith("native-") && (variantFetchEnabled() || fetchVariants)) {
     await attachVariantData(simplifiedDesign, variantTargets, figmaService);
   }
   // pruneNativeDecoration is NOT called here — in the batch path, dev
@@ -427,8 +450,9 @@ async function fetchAndEnrichTarget(
   }
   // Render icons on the post-focus tree (same batched /images approach as the
   // single-target path), stamped inline as iconUrl.
+  let iconsFound = 0;
   if (downloadIcons) {
-    await collectIconRenderUrls(simplifiedDesign, figmaService, fileKey);
+    iconsFound = await collectIconRenderUrls(simplifiedDesign, figmaService, fileKey);
   }
   const simplifyMs = Date.now() - simplifyStart;
 
@@ -442,7 +466,7 @@ async function fetchAndEnrichTarget(
     hasVariables: detectVariables(rawApiResponse),
     fetchMs,
     simplifyMs,
-    downloadIcons,
+    iconsFound,
   };
 }
 
@@ -581,7 +605,7 @@ export async function getFigmaDataBatch(
       nodeId: p.nodeId,
       formatted,
       variantsFormatted,
-      iconScript: p.downloadIcons ? loadIconDownloadScript() : undefined,
+      iconScript: p.iconsFound > 0 ? loadIconDownloadScript() : undefined,
       metrics,
     };
   });

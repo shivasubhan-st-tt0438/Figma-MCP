@@ -45,6 +45,23 @@ export function variantCacheDir(): string {
   return process.env.FIGMA_MCP_VARIANT_CACHE_DIR || join(tmpdir(), "figma-mcp-variant-cache");
 }
 
+/**
+ * Whether the whole variant-fetch feature (the second `variantData` document —
+ * source-library UI for custom sets, cross-file `/nodes` calls, disk cache)
+ * runs at all. Read directly from the environment, same reasoning as
+ * variantCacheDir: server infrastructure, not a per-request option.
+ *
+ * Defaults to OFF. Unlike icon rendering (one call, opt-in per fetch via
+ * `downloadIcons`), this feature's cost is structural — every remote
+ * component set costs a cross-file Tier-1 `/nodes` call the first time it's
+ * seen — so it must be an explicit, deliberate opt-in at the server level,
+ * not something that silently starts spending rate-limit budget the moment
+ * someone fetches with a native output format.
+ */
+export function variantFetchEnabled(): boolean {
+  return process.env.FIGMA_MCP_FETCH_VARIANTS === "true";
+}
+
 /** YYYY-MM-DD in the server's local timezone. */
 function dateStamp(now: Date): string {
   const y = now.getFullYear();
